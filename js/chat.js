@@ -195,7 +195,26 @@ async function callGeminiRaw(contents, opts = {}) {
     throw new Error(msg || `Error ${resp.status}`);
   }
   const data = await resp.json();
-  return data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '(sin respuesta)';
+  const candidate = data.candidates?.[0];
+  const text = candidate?.content?.parts?.map(p => p.text || '').join('') || '';
+  if (!text) return '(sin respuesta)';
+  // If the model hit the output token limit, retry once with a doubled budget
+  if (candidate?.finishReason === 'MAX_TOKENS') {
+    const retryMaxTokens = Math.min(maxTokens * 2, 65536);
+    const retryBody = JSON.stringify({
+      systemInstruction: { parts: [{ text: sysInstruction }] },
+      contents,
+      generationConfig: { temperature: 0.3, maxOutputTokens: retryMaxTokens }
+    });
+    const r2 = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: retryBody });
+    if (r2.ok) {
+      const d2 = await r2.json();
+      const text2 = d2.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+      if (text2) return text2;
+    }
+    return text + '<br><em style="color:var(--warning,#f90)">⚠️ Respuesta extensa. Podés pedir más detalles en otra consulta.</em>';
+  }
+  return text;
 }
 
 // ===================== MAIN SEND HANDLER =====================

@@ -57,6 +57,7 @@ function analyzeColumns(data) {
   const pos2Col = columns.find(c => /segunda\s*posici|second.*pos/i.test(removeAccents(c)));
   const pos3Col = columns.find(c => /posicion\s*extra|tercera\s*pos/i.test(removeAccents(c)));
   const edadCol = columns.find(c => /edad|age|a[ñn]os/i.test(c));
+  const minutosCol = columns.find(c => /minutos?\s*(jugados?)?$|^min$/i.test(c.trim()));
   // Detect country/passport columns
   const paisCol = columns.find(c => /pa[ií]s.*nacimiento|country/i.test(removeAccents(c)));
   const pieCol = columns.find(c => /^pie$|foot/i.test(c.trim()));
@@ -67,7 +68,7 @@ function analyzeColumns(data) {
   const defensiveCols = columns.filter(c => /defensiv|entrada|intercep|tiro.*intercep|bloqueo|despe|falta/i.test(removeAccents(c)));
   const attackCols = columns.filter(c => /ataque|gol|remat|tiro|xg|cabeza|regate|duel.*atac|toques.*area|aceler|carrer.*progres/i.test(removeAccents(c)));
   const passCols = columns.filter(c => /pase|centro|asist|clave|profund|progresiv|ltimo.*tercio|ultimo.*tercio/i.test(removeAccents(c)));
-  return { columns, numCols, nameCol, equipoCol, posCol, pos2Col, pos3Col, edadCol, paisCol, pieCol, alturaCol, candidateCols, defensiveCols, attackCols, passCols };
+  return { columns, numCols, nameCol, equipoCol, posCol, pos2Col, pos3Col, edadCol, minutosCol, paisCol, pieCol, alturaCol, candidateCols, defensiveCols, attackCols, passCols };
 }
 
 // ===================== PRE-COMPUTE DATASET SUMMARIES =====================

@@ -275,7 +275,7 @@ function buildNoLeagueOffline() {
 
 // ===================== SMART DATA SLICER FOR GEMINI =====================
 function buildCompactData(query, leagueName, data) {
-  const { columns, numCols, nameCol, equipoCol, posCol, pos2Col, pos3Col, edadCol, paisCol, pieCol, alturaCol, candidateCols, defensiveCols, attackCols, passCols } = analyzeColumns(data);
+  const { columns, numCols, nameCol, equipoCol, posCol, pos2Col, pos3Col, edadCol, minutosCol, paisCol, pieCol, alturaCol, candidateCols, defensiveCols, attackCols, passCols } = analyzeColumns(data);
   const totalRows = data.length;
   const qType = classifyQuery(query);
   const qNorm = removeAccents(query.toLowerCase());
@@ -296,6 +296,20 @@ function buildCompactData(query, leagueName, data) {
     });
     // Only use position filter if it yields results
     if (posFiltered.length > 0) filtered = posFiltered;
+  }
+
+  // Pre-filter by minutes played if the query mentions a minutes threshold
+  const minutesFilter = extractMinutesFilter(query, minutosCol);
+  if (minutesFilter) {
+    const mFiltered = filtered.filter(r => {
+      const v = parseFloat(r[minutesFilter.col]);
+      if (isNaN(v)) return false;
+      if (minutesFilter.op === '>') return v > minutesFilter.val;
+      if (minutesFilter.op === '>=') return v >= minutesFilter.val;
+      if (minutesFilter.op === '<') return v < minutesFilter.val;
+      return true;
+    });
+    if (mFiltered.length > 0) filtered = mFiltered;
   }
 
   // Detect sort column
@@ -327,17 +341,17 @@ function buildCompactData(query, leagueName, data) {
       selectedCols.push(...passCols);
     }
     selectedCols = [...new Set(selectedCols)];
-    maxTokens = 16384;
+    maxTokens = 32768;
   } else if (qType === 'compare') {
     topN = Math.min(filtered.length, 40);
     selectedCols = [...identityCols, ...candidateCols];
     selectedCols = [...new Set(selectedCols)];
-    maxTokens = 12288;
+    maxTokens = 16384;
   } else if (qType === 'analysis') {
     topN = Math.min(filtered.length, 40);
     selectedCols = [...identityCols, ...candidateCols.slice(0, 30)];
     selectedCols = [...new Set(selectedCols)];
-    maxTokens = 12288;
+    maxTokens = 16384;
   } else {
     // Standard → focused data but still include position
     topN = Math.min(filtered.length, 30);
@@ -378,6 +392,7 @@ function buildCompactData(query, leagueName, data) {
   // Build prompt
   let prompt = `L:"${leagueName}"|P:${totalRows}|F:${filtered.length}`;
   if (positionFilter) prompt += `|POS_FILTER:${positionFilter.join(',')}`;
+  if (minutesFilter) prompt += `|MIN_FILTER:${minutesFilter.col}${minutesFilter.op}${minutesFilter.val}`;
   prompt += `\nH:${h.join('|')}`;
   prompt += `\nD:${csvRows.map(r => r.join('|')).join('\n')}`;
   if (statsStr) prompt += `\nS:${statsStr}`;
@@ -388,6 +403,23 @@ function buildCompactData(query, leagueName, data) {
   prompt += `\nQ:${query}`;
 
   return { prompt, maxTokens };
+}
+
+// Extract minutes-played threshold from query for local pre-filtering
+function extractMinutesFilter(query, minutosCol) {
+  if (!minutosCol) return null;
+  const patterns = [
+    { re: /(?:más|mas)\s+de\s+(\d+)\s*(?:minutos?(?:\s+jugados?)?)/i, op: '>' },
+    { re: /(?:al\s+menos|mínimo|minimo)\s+(\d+)\s*(?:minutos?(?:\s+jugados?)?)/i, op: '>=' },
+    { re: /(?:menos)\s+de\s+(\d+)\s*(?:minutos?(?:\s+jugados?)?)/i, op: '<' },
+    { re: /(\d+)\s*(?:minutos?(?:\s+jugados?)?)\s+(?:o\s+más|como\s+mínimo)/i, op: '>=' },
+    { re: /(\d{3,})\+\s*(?:min(?:utos?)?)/i, op: '>=' },
+  ];
+  for (const { re, op } of patterns) {
+    const m = query.match(re);
+    if (m) return { col: minutosCol, op, val: parseInt(m[1]) };
+  }
+  return null;
 }
 
 // Extract position filter from query
