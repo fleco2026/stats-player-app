@@ -11,7 +11,7 @@ function addMessage(role, html) {
   if (conv) {
     conv.history.push({ role, html });
     if (role === 'user' && conv.history.filter(m => m.role === 'user').length === 1) {
-      conv.title = html.replace(/<[^>]+>/g, '').substring(0, 50);
+      conv.title = stripHtml(html).substring(0, 50);
     }
     saveConvs(); renderConvList();
   }
