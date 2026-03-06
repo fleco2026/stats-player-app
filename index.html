@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>⚽ FútbolStats AI</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root {
+    --bg-primary: #0a0e17;
+    --bg-card: #111827;
+    --bg-card-hover: #1a2332;
+    --accent: #00e88f;
+    --accent-dim: #00e88f22;
+    --accent-mid: #00e88f55;
+    --text-primary: #e8ecf1;
+    --text-secondary: #7a8599;
+    --text-dim: #4a5568;
+    --border: #1e293b;
+    --danger: #ff4757;
+    --warning: #ffa502;
+    --glass: rgba(17, 24, 39, 0.92);
+    --sidebar-width: 260px;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:'DM Sans',sans-serif; background:var(--bg-primary); color:var(--text-primary); min-height:100vh; overflow-x:hidden; display:flex; }
+  body::before { content:''; position:fixed; top:-50%; left:-50%; width:200%; height:200%; background: radial-gradient(ellipse at 20% 50%,#00e88f08 0%,transparent 50%), radial-gradient(ellipse at 80% 20%,#0066ff06 0%,transparent 50%), radial-gradient(ellipse at 50% 80%,#8b5cf608 0%,transparent 50%); z-index:0; animation:bgShift 20s ease-in-out infinite alternate; }
+  @keyframes bgShift { 0%{transform:translate(0,0) rotate(0deg)} 100%{transform:translate(-3%,3%) rotate(2deg)} }
+
+  /* === SIDEBAR === */
+  .sidebar { position:fixed; top:0; left:0; bottom:0; width:var(--sidebar-width); background:var(--glass); backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px); border-right:1px solid var(--border); display:flex; flex-direction:column; z-index:200; transition:transform .3s cubic-bezier(.16,1,.3,1); }
+  .sidebar-header { padding:16px 14px 12px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; gap:8px; flex-shrink:0; }
+  .sidebar-logo { font-family:'Space Mono',monospace; font-size:14px; font-weight:700; background:linear-gradient(135deg,var(--accent),#00b8d4); -webkit-background-clip:text; -webkit-text-fill-color:transparent; white-space:nowrap; }
+  .btn-new-chat { background:var(--accent-dim); border:1px solid var(--accent-mid); color:var(--accent); border-radius:8px; padding:5px 10px; font-size:11px; font-weight:600; cursor:pointer; transition:all .2s; white-space:nowrap; flex-shrink:0; }
+  .btn-new-chat:hover { background:var(--accent); color:var(--bg-primary); }
+  .sidebar-list { flex:1; overflow-y:auto; padding:8px 6px; }
+  .sidebar-section-label { font-size:10px; color:var(--text-dim); text-transform:uppercase; letter-spacing:1.5px; padding:8px 8px 4px; }
+  .conv-item { display:flex; align-items:center; gap:8px; padding:8px 10px; border-radius:10px; cursor:pointer; transition:all .15s; border:1px solid transparent; margin-bottom:2px; }
+  .conv-item:hover { background:var(--bg-card-hover); border-color:var(--border); }
+  .conv-item.active { background:var(--accent-dim); border-color:var(--accent-mid); }
+  .conv-item-icon { font-size:14px; flex-shrink:0; }
+  .conv-item-info { flex:1; overflow:hidden; }
+  .conv-item-title { font-size:12px; font-weight:500; color:var(--text-primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .conv-item.active .conv-item-title { color:var(--accent); }
+  .conv-item-meta { font-size:10px; color:var(--text-dim); margin-top:1px; }
+  .conv-item-del { background:none; border:none; color:var(--text-dim); font-size:13px; cursor:pointer; padding:2px 5px; border-radius:4px; opacity:0; transition:all .15s; flex-shrink:0; }
+  .conv-item:hover .conv-item-del { opacity:1; }
+  .conv-item-del:hover { color:var(--danger); background:#ff475720; }
+  .sidebar-empty { padding:24px 12px; text-align:center; font-size:12px; color:var(--text-dim); line-height:1.6; }
+  .sidebar-footer { padding:10px 12px; border-top:1px solid var(--border); flex-shrink:0; font-size:10px; color:var(--text-dim); text-align:center; }
+  .sidebar-toggle { display:none; position:fixed; top:12px; left:12px; z-index:300; background:var(--bg-card); border:1px solid var(--border); border-radius:10px; width:38px; height:38px; align-items:center; justify-content:center; cursor:pointer; font-size:16px; color:var(--text-secondary); }
+  .sidebar-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:150; }
+
+  /* === MAIN === */
+  .main { flex:1; margin-left:var(--sidebar-width); display:flex; flex-direction:column; position:relative; z-index:1; min-width:0; }
+  .app-container { position:relative; z-index:1; max-width:820px; margin:0 auto; padding:16px 20px 100px; width:100%; }
+
+  /* === HEADER === */
+  .header { text-align:center; padding:24px 0 18px; }
+  .logo { font-family:'Space Mono',monospace; font-size:26px; font-weight:700; letter-spacing:-1px; background:linear-gradient(135deg,var(--accent),#00b8d4); -webkit-background-clip:text; -webkit-text-fill-color:transparent; display:inline-block; }
+  .logo span { font-weight:400; opacity:.7; }
+  .subtitle { font-size:12px; color:var(--text-secondary); margin-top:4px; letter-spacing:2px; text-transform:uppercase; }
+
+  /* === API KEY === */
+  .api-section { background:var(--bg-card); border:1px solid var(--border); border-radius:16px; padding:14px 16px; margin-bottom:12px; transition:all .3s; }
+  .api-section.connected { border-color:var(--accent-mid); background:linear-gradient(135deg,var(--bg-card),#0a1a15); }
+  .api-header { display:flex; align-items:center; justify-content:space-between; cursor:pointer; }
+  .api-header h3 { font-size:13px; font-weight:500; display:flex; align-items:center; gap:8px; }
+  .status-dot { width:8px; height:8px; border-radius:50%; background:var(--danger); display:inline-block; transition:all .3s; }
+  .status-dot.active { background:var(--accent); box-shadow:0 0 8px var(--accent-mid); }
+  .api-body { margin-top:12px; display:none; }
+  .api-body.visible { display:block; }
+  .api-input-row { display:flex; gap:8px; }
+  .api-input-row input { flex:1; background:var(--bg-primary); border:1px solid var(--border); border-radius:10px; padding:10px 14px; color:var(--text-primary); font-family:'Space Mono',monospace; font-size:12px; outline:none; transition:border-color .3s; }
+  .api-input-row input:focus { border-color:var(--accent); }
+  .api-input-row button { background:var(--accent); color:var(--bg-primary); border:none; border-radius:10px; padding:10px 18px; font-weight:700; font-size:13px; cursor:pointer; white-space:nowrap; transition:all .2s; }
+  .api-input-row button:hover { transform:scale(1.02); box-shadow:0 4px 15px var(--accent-mid); }
+  .api-note { font-size:11px; color:var(--text-dim); margin-top:8px; line-height:1.5; }
+
+  /* === LEAGUES === */
+  .leagues-section { margin-bottom:14px; }
+  .leagues-label { font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:1.5px; margin-bottom:8px; padding-left:2px; }
+  .leagues-grid { display:flex; flex-wrap:wrap; gap:7px; }
+  .league-badge { display:flex; align-items:center; gap:5px; background:var(--bg-card); border:1px solid var(--border); border-radius:10px; padding:6px 12px; font-size:11px; font-weight:500; color:var(--text-secondary); transition:all .2s; }
+  .league-badge.loaded { border-color:var(--accent-mid); color:var(--accent); background:var(--accent-dim); }
+  .league-badge.loading { border-color:var(--warning); color:var(--warning); opacity:.8; animation:pulse 1.2s ease-in-out infinite; }
+  .league-badge.error { border-color:var(--danger); color:var(--danger); opacity:.7; }
+  @keyframes pulse { 0%,100%{opacity:.6} 50%{opacity:1} }
+  .league-dot { width:6px; height:6px; border-radius:50%; background:currentColor; flex-shrink:0; }
+
+  /* === LOADING BAR === */
+  .loading-bar { background:var(--bg-card); border:1px solid var(--border); border-radius:14px; padding:16px 20px; margin-bottom:12px; display:none; align-items:center; gap:14px; }
+  .loading-bar.visible { display:flex; }
+  .loading-spinner { width:20px; height:20px; border:2px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; flex-shrink:0; }
+  @keyframes spin { to{transform:rotate(360deg)} }
+  .loading-text { font-size:13px; color:var(--text-secondary); }
+
+  /* === QUICK CHIPS === */
+  .quick-section { margin-bottom:12px; }
+  .quick-label { font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:1.5px; margin-bottom:8px; padding-left:4px; }
+  .quick-chips { display:flex; flex-wrap:wrap; gap:6px; }
+  .chip { background:var(--bg-card); border:1px solid var(--border); color:var(--text-secondary); padding:7px 14px; border-radius:20px; font-size:12px; cursor:pointer; transition:all .2s; white-space:nowrap; }
+  .chip:hover { border-color:var(--accent); color:var(--accent); background:var(--accent-dim); }
+
+  /* === CHAT === */
+  .chat-area { display:flex; flex-direction:column; gap:12px; margin-bottom:20px; min-height:100px; }
+  .message { max-width:92%; animation:msgIn .35s cubic-bezier(.16,1,.3,1); }
+  @keyframes msgIn { from{opacity:0;transform:translateY(12px)} to{opacity:1;transform:translateY(0)} }
+  .message.user { align-self:flex-end; }
+  .message.assistant { align-self:flex-start; }
+  .message-bubble { padding:12px 16px; border-radius:16px; font-size:14px; line-height:1.6; }
+  .message.user .message-bubble { background:linear-gradient(135deg,#00e88f,#00b8d4); color:var(--bg-primary); border-bottom-right-radius:4px; font-weight:500; }
+  .message.assistant .message-bubble { background:var(--bg-card); border:1px solid var(--border); border-bottom-left-radius:4px; color:var(--text-primary); }
+  .message-bubble strong { color:var(--accent); font-weight:700; }
+  .message-bubble ul,.message-bubble ol { margin:8px 0; padding-left:20px; }
+  .message-bubble li { margin:4px 0; }
+  .message-bubble code { background:var(--bg-primary); padding:2px 6px; border-radius:4px; font-family:'Space Mono',monospace; font-size:12px; }
+  .message-bubble h3 { font-size:15px; margin:12px 0 6px; color:var(--accent); }
+  .message-bubble p { margin:6px 0; }
+  .message-bubble table { width:100%; border-collapse:collapse; margin:8px 0; font-size:12px; }
+  .message-bubble table th,.message-bubble table td { padding:6px 10px; border:1px solid var(--border); text-align:left; }
+  .message-bubble table th { background:var(--bg-primary); color:var(--accent); font-family:'Space Mono',monospace; font-size:11px; }
+  .typing-indicator { display:flex; gap:5px; padding:16px; align-self:flex-start; }
+  .typing-indicator span { width:8px; height:8px; background:var(--accent); border-radius:50%; animation:bounce 1.2s ease-in-out infinite; }
+  .typing-indicator span:nth-child(2) { animation-delay:.15s; }
+  .typing-indicator span:nth-child(3) { animation-delay:.3s; }
+  @keyframes bounce { 0%,60%,100%{transform:translateY(0);opacity:.4} 30%{transform:translateY(-8px);opacity:1} }
+
+  /* === INPUT BAR === */
+  .input-bar { position:fixed; bottom:0; left:var(--sidebar-width); right:0; background:var(--glass); backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px); border-top:1px solid var(--border); padding:12px 20px; padding-bottom:max(12px,env(safe-area-inset-bottom)); z-index:100; }
+  .input-wrap { max-width:820px; margin:0 auto; display:flex; gap:8px; align-items:flex-end; }
+  .input-wrap textarea { flex:1; background:var(--bg-card); border:1px solid var(--border); border-radius:14px; padding:12px 16px; color:var(--text-primary); font-family:'DM Sans',sans-serif; font-size:14px; resize:none; outline:none; max-height:120px; min-height:44px; line-height:1.4; transition:border-color .3s; }
+  .input-wrap textarea:focus { border-color:var(--accent); }
+  .input-wrap textarea::placeholder { color:var(--text-dim); }
+  .btn-send,.btn-mic { width:44px; height:44px; border-radius:12px; font-size:18px; cursor:pointer; display:flex; align-items:center; justify-content:center; transition:all .2s; flex-shrink:0; }
+  .btn-send { background:var(--accent); border:none; color:var(--bg-primary); }
+  .btn-send:hover { transform:scale(1.05); box-shadow:0 4px 15px var(--accent-mid); }
+  .btn-send:disabled { opacity:.3; cursor:not-allowed; transform:none; box-shadow:none; }
+  .btn-mic { background:var(--bg-card); border:1px solid var(--border); color:var(--text-secondary); }
+  .btn-mic:hover { border-color:var(--accent); color:var(--accent); }
+  .btn-mic.listening { background:#ff475720; border-color:var(--danger); color:var(--danger); animation:micPulse 1s ease-in-out infinite; }
+  @keyframes micPulse { 0%,100%{box-shadow:0 0 0 0 rgba(255,71,87,.4)} 50%{box-shadow:0 0 0 8px rgba(255,71,87,0)} }
+
+  /* === NO AI NOTICE === */
+  .no-ai-notice { background:var(--bg-card); border:1px solid var(--border); border-radius:12px; padding:12px 16px; margin-bottom:12px; font-size:13px; color:var(--text-secondary); line-height:1.6; display:none; }
+  .no-ai-notice.visible { display:block; }
+  .no-ai-notice strong { color:var(--warning); }
+
+  /* === SCROLLBAR === */
+  ::-webkit-scrollbar { width:5px; height:5px; }
+  ::-webkit-scrollbar-track { background:transparent; }
+  ::-webkit-scrollbar-thumb { background:var(--border); border-radius:3px; }
+  ::-webkit-scrollbar-thumb:hover { background:var(--text-dim); }
+
+  /* === RESPONSIVE === */
+  @media (max-width:768px) {
+    .sidebar { transform:translateX(-100%); }
+    .sidebar.open { transform:translateX(0); }
+    .sidebar-overlay.open { display:block; }
+    .sidebar-toggle { display:flex; }
+    .main { margin-left:0; }
+    .input-bar { left:0; }
+    .app-container { padding:16px 12px 100px; padding-top:60px; }
+    .logo { font-size:22px; }
+    .message { max-width:96%; }
+  }
+</style>
+</head>
+<body>
+
+<!-- SIDEBAR TOGGLE (mobile) -->
+<button class="sidebar-toggle" id="sidebarToggle" onclick="toggleSidebar()">☰</button>
+<div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
+
+<!-- SIDEBAR -->
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header">
+    <span class="sidebar-logo">⚽ FútbolStats</span>
+    <button class="btn-new-chat" onclick="newConversation()">+ Nueva</button>
+  </div>
+  <div class="sidebar-list" id="convList"></div>
+  <div class="sidebar-footer">Conversaciones guardadas localmente</div>
+</aside>
+
+<!-- MAIN CONTENT -->
+<div class="main">
+  <div class="app-container">
+
+    <!-- HEADER -->
+    <div class="header">
+      <div class="logo">FútbolStats<span>AI</span></div>
+      <div class="subtitle">5 Ligas Argentinas · Gemini AI · Voz</div>
+    </div>
+
+    <!-- API KEY -->
+    <div class="api-section" id="apiSection">
+      <div class="api-header" onclick="toggleApiBody()">
+        <h3><span class="status-dot" id="apiDot"></span> Gemini AI</h3>
+        <span style="font-size:12px;color:var(--text-dim)" id="apiToggleLabel">▼ Configurar</span>
+      </div>
+      <div class="api-body" id="apiBody">
+        <div class="api-input-row">
+          <input type="password" id="apiKeyInput" placeholder="AIzaSy..." aria-label="Gemini API Key" />
+          <button onclick="saveApiKey()">Conectar</button>
+        </div>
+        <div class="api-note">
+          Tu API key se guarda en este navegador (localStorage).
+          Obtén una gratis en <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:var(--accent)">aistudio.google.com</a>.
+        </div>
+      </div>
+    </div>
+
+    <!-- NO AI NOTICE -->
+    <div class="no-ai-notice" id="noAiNotice">
+      <strong>⚡ Modo offline:</strong> Sin API key de Gemini, las consultas se procesan localmente.
+    </div>
+
+    <!-- LOADING BAR -->
+    <div class="loading-bar" id="loadingBar">
+      <div class="loading-spinner"></div>
+      <span class="loading-text">Cargando datos de las ligas...</span>
+    </div>
+
+    <!-- LEAGUES -->
+    <div class="leagues-section">
+      <div class="leagues-label">Ligas disponibles</div>
+      <div class="leagues-grid" id="leaguesGrid"></div>
+    </div>
+
+    <!-- QUICK QUERIES -->
+    <div class="quick-section" id="quickSection">
+      <div class="quick-label">Consultas rápidas</div>
+      <div class="quick-chips">
+        <div class="chip" onclick="quickQuery('Top 10 goleadores de la Liga Profesional')">🥅 Goleadores Liga Prof.</div>
+        <div class="chip" onclick="quickQuery('Promedio de edad en la Primera Nacional')">📊 Edad Primera Nacional</div>
+        <div class="chip" onclick="quickQuery('Jugadores con más asistencias en el Torneo Federal A')">🎯 Asistencias Federal A</div>
+        <div class="chip" onclick="quickQuery('Top 5 por xG en la Primera B Metro')">⚡ xG Primera B Metro</div>
+        <div class="chip" onclick="quickQuery('Top 10 jugadores por minutos jugados en el Torneo Proyeccion')">⏱ Minutos Torneo Proyección</div>
+        <div class="chip" onclick="quickQuery('¿Qué ligas tenés cargadas?')">📋 Ver ligas disponibles</div>
+      </div>
+    </div>
+
+    <!-- CHAT -->
+    <div class="chat-area" id="chatArea"></div>
+
+  </div>
+</div>
+
+<!-- INPUT BAR -->
+<div class="input-bar">
+  <div class="input-wrap">
+    <textarea id="queryInput" rows="1" placeholder="Ej: Top goleadores de la Liga Profesional..." aria-label="Consulta" oninput="autoResize(this)"></textarea>
+    <button class="btn-mic" id="btnMic" onclick="toggleMic()" title="Hablar">🎤</button>
+    <button class="btn-send" id="btnSend" onclick="handleSend()" disabled>➤</button>
+  </div>
+</div>
+
+<script>
+const DATASETS_CONFIG = [
+  { name:'Liga Profesional 2025', file:'Liga Profesional 2025.xlsx', keywords:['liga profesional','liga prof','profesional'], emoji:'🏆' },
+  { name:'Primera B Metro 2025', file:'Primera B Metro 2025.xlsx', keywords:['primera b','b metro','metro'], emoji:'🥈' },
+  { name:'Primera Nacional 2025', file:'Primera Nacional 2025.xlsx', keywords:['primera nacional','nacional'], emoji:'🥉' },
+  { name:'Torneo Federal A 2025', file:'Torneo Federal A 2025.xlsx', keywords:['federal a','federal','torneo federal'], emoji:'🌐' },
+  { name:'Torneo Proyeccion 2025', file:'Torneo Proyeccion 2025.xlsx', keywords:['proyeccion','proyección','torneo proyeccion','torneo proyección'], emoji:'🌟' }
+];
+const GEMINI_MODEL = 'gemini-2.5-flash';
+const loadedDatasets = {};
+let apiKey = '';
+let isProcessing = false;
+let recognition = null;
+let isListening = false;
+let conversations = [];
+let activeConvId = null;
+
+// ===================== INIT =====================
+document.addEventListener('DOMContentLoaded', async () => {
+  try { const s = localStorage.getItem('fstats_gemini_key'); if (s) { apiKey=s; updateApiStatus(true); } else { document.getElementById('noAiNotice').classList.add('visible'); } } catch(e) {}
+  loadConversationsFromStorage();
+  renderLeagueBadges();
+  document.getElementById('loadingBar').classList.add('visible');
+  await loadAllDatasets();
+  document.getElementById('loadingBar').classList.remove('visible');
+  if (conversations.length === 0) createNewConversation(true);
+  else setActiveConversation(conversations[0].id);
+  document.getElementById('queryInput').addEventListener('keydown', e => { if (e.key==='Enter'&&!e.shiftKey){e.preventDefault();handleSend();} });
+  document.getElementById('queryInput').addEventListener('input', () => { document.getElementById('btnSend').disabled=!document.getElementById('queryInput').value.trim(); });
+  initSpeechRecognition();
+});
+
+// ===================== CONVERSATIONS =====================
+function loadConversationsFromStorage() {
+  try { const r=localStorage.getItem('fstats_conversations'); if(r) conversations=JSON.parse(r); } catch(e){conversations=[];}
+  renderConvList();
+}
+function saveConvs() { try{localStorage.setItem('fstats_conversations',JSON.stringify(conversations));}catch(e){} }
+function createNewConversation(silent) {
+  const id=Date.now().toString();
+  conversations.unshift({id, title:'Nueva consulta', history:[], leagueEmoji:null, createdAt:Date.now()});
+  saveConvs(); setActiveConversation(id);
+  if(!silent) addMessage('assistant',`⚽ <strong>Nueva conversación.</strong><br>Tengo cargadas <strong>${Object.keys(loadedDatasets).length} ligas</strong> cargadas. Mencioná el nombre en tu consulta.`);
+  renderConvList();
+}
+function newConversation() { createNewConversation(false); closeSidebar(); }
+function setActiveConversation(id) { activeConvId=id; renderConvList(); renderChatArea(); }
+function getActiveConv() { return conversations.find(c=>c.id===activeConvId)||null; }
+function deleteConversation(id,e) {
+  e.stopPropagation();
+  conversations=conversations.filter(c=>c.id!==id); saveConvs();
+  if(activeConvId===id){if(conversations.length>0)setActiveConversation(conversations[0].id);else createNewConversation(true);}
+  else renderConvList();
+}
+function renderConvList() {
+  const list=document.getElementById('convList');
+  if(!conversations.length){list.innerHTML='<div class="sidebar-empty">Aún no hay conversaciones.<br>¡Hacé tu primera consulta!</div>';return;}
+  const today=new Date();today.setHours(0,0,0,0);
+  const yesterday=new Date(today);yesterday.setDate(today.getDate()-1);
+  const week=new Date(today);week.setDate(today.getDate()-7);
+  const groups={'Hoy':[],'Ayer':[],'Últimos 7 días':[],'Anteriores':[]};
+  for(const c of conversations){const d=new Date(c.createdAt);d.setHours(0,0,0,0);if(d>=today)groups['Hoy'].push(c);else if(d>=yesterday)groups['Ayer'].push(c);else if(d>=week)groups['Últimos 7 días'].push(c);else groups['Anteriores'].push(c);}
+  let html='';
+  for(const[label,items]of Object.entries(groups)){if(!items.length)continue;html+=`<div class="sidebar-section-label">${label}</div>`;
+    for(const c of items){const act=c.id===activeConvId?'active':'';const icon=c.leagueEmoji||'💬';
+      html+=`<div class="conv-item ${act}" onclick="loadConv('${c.id}')"><span class="conv-item-icon">${icon}</span><div class="conv-item-info"><div class="conv-item-title">${escapeHtml(c.title)}</div><div class="conv-item-meta">${c.history.length} msgs</div></div><button class="conv-item-del" onclick="deleteConversation('${c.id}',event)" title="Eliminar">✕</button></div>`;
+    }
+  }
+  list.innerHTML=html;
+}
+function loadConv(id){setActiveConversation(id);closeSidebar();}
+function renderChatArea() {
+  const area=document.getElementById('chatArea');
+  const conv=getActiveConv();
+  if(!conv||conv.history.length===0){
+    area.innerHTML='';
+    const loaded=Object.keys(loadedDatasets).length;
+    const el=document.createElement('div');el.className='message assistant';
+    el.innerHTML=`<div class="message-bubble">⚽ <strong>¡Bienvenido a FútbolStats AI!</strong><br><br>Tengo cargadas <strong>${loaded} ligas argentinas</strong>:<br>${DATASETS_CONFIG.map(d=>{const ok=loadedDatasets[d.name];return `${d.emoji} <strong>${d.name}</strong>`+(ok?` — ${ok.length} jugadores`:' — <span style="color:var(--danger)">error</span>');}).join('<br>')}<br><br>Mencioná el nombre de la liga en tu consulta.</div>`;
+    area.appendChild(el);return;
+  }
+  area.innerHTML=conv.history.map(m=>`<div class="message ${m.role}"><div class="message-bubble">${m.html}</div></div>`).join('');
+  scrollToBottom();
+}
+
+// ===================== LOAD DATASETS =====================
+async function loadAllDatasets(){await Promise.all(DATASETS_CONFIG.map(ds=>loadDataset(ds)));DATASETS_CONFIG.forEach(d=>{if(loadedDatasets[d.name])updateLeagueBadge(d.name,'loaded');});}
+async function loadDataset(ds){
+  updateLeagueBadge(ds.name,'loading');
+  try{const resp=await fetch(ds.file);if(!resp.ok)throw new Error(`HTTP ${resp.status}`);const buf=await resp.arrayBuffer();const wb=XLSX.read(buf,{type:'array'});const ws=wb.Sheets[wb.SheetNames[0]];let json=XLSX.utils.sheet_to_json(ws,{defval:null});
+  const fk=Object.keys(json[0]||{})[0];json=json.filter(r=>r[fk]!==fk);json=json.map(r=>{const c={};for(const[k,v]of Object.entries(r)){if(k&&k!=='null'&&!k.startsWith('__EMPTY'))c[k]=v;}return c;});
+  loadedDatasets[ds.name]=json;updateLeagueBadge(ds.name,'loaded');if(getActiveConv()?.history.length===0)renderChatArea();
+  }catch(err){console.error(`Error cargando ${ds.name}:`,err);updateLeagueBadge(ds.name,'error');}
+}
+function renderLeagueBadges(){document.getElementById('leaguesGrid').innerHTML=DATASETS_CONFIG.map(d=>`<div class="league-badge loading" id="badge_${slugify(d.name)}"><span class="league-dot"></span>${d.emoji} ${d.name}</div>`).join('');}
+function updateLeagueBadge(n,s){const el=document.getElementById('badge_'+slugify(n));if(el)el.className='league-badge '+s;}
+function slugify(s){return s.toLowerCase().replace(/[^a-z0-9]/g,'_');}
+
+// ===================== API KEY =====================
+function toggleApiBody(){const b=document.getElementById('apiBody');b.classList.toggle('visible');document.getElementById('apiToggleLabel').textContent=b.classList.contains('visible')?'▲ Cerrar':'▼ Configurar';}
+function saveApiKey(){const v=document.getElementById('apiKeyInput').value.trim();if(!v)return;apiKey=v;try{localStorage.setItem('fstats_gemini_key',v);}catch(e){}updateApiStatus(true);document.getElementById('apiBody').classList.remove('visible');document.getElementById('apiToggleLabel').textContent='▼ Configurar';document.getElementById('noAiNotice').classList.remove('visible');}
+function updateApiStatus(c){const d=document.getElementById('apiDot');const s=document.getElementById('apiSection');if(c){d.classList.add('active');s.classList.add('connected');}else{d.classList.remove('active');s.classList.remove('connected');}}
+
+// ===================== SIDEBAR MOBILE =====================
+function toggleSidebar(){document.getElementById('sidebar').classList.toggle('open');document.getElementById('sidebarOverlay').classList.toggle('open');}
+function closeSidebar(){document.getElementById('sidebar').classList.remove('open');document.getElementById('sidebarOverlay').classList.remove('open');}
+
+// ===================== DATASET DETECTION =====================
+function detectDataset(q){const l=q.toLowerCase();for(const ds of DATASETS_CONFIG)for(const kw of ds.keywords)if(l.includes(kw))return ds.name;return null;}
+
+// ===================== SPEECH RECOGNITION =====================
+function initSpeechRecognition(){const SR=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SR){document.getElementById('btnMic').style.display='none';return;}recognition=new SR();recognition.lang='es-ES';recognition.continuous=false;recognition.interimResults=false;recognition.onresult=e=>{const t=e.results[0][0].transcript;const inp=document.getElementById('queryInput');inp.value=t;autoResize(inp);document.getElementById('btnSend').disabled=false;stopListening();};recognition.onerror=()=>stopListening();recognition.onend=()=>stopListening();}
+function toggleMic(){if(isListening){recognition.stop();stopListening();}else startListening();}
+function startListening(){if(!recognition)return;isListening=true;document.getElementById('btnMic').classList.add('listening');document.getElementById('btnMic').title='Detener';recognition.start();}
+function stopListening(){isListening=false;document.getElementById('btnMic').classList.remove('listening');document.getElementById('btnMic').title='Hablar';}
+
+// ===================== CHAT =====================
+function addMessage(role,html){
+  const conv=getActiveConv();
+  if(conv){conv.history.push({role,html});if(role==='user'&&conv.history.filter(m=>m.role==='user').length===1)conv.title=html.replace(/<[^>]+>/g,'').substring(0,50);saveConvs();renderConvList();}
+  const area=document.getElementById('chatArea');const msg=document.createElement('div');msg.className=`message ${role}`;msg.innerHTML=`<div class="message-bubble">${html}</div>`;area.appendChild(msg);scrollToBottom();
+}
+function showTyping(){const area=document.getElementById('chatArea');const ind=document.createElement('div');ind.className='typing-indicator';ind.id='typingIndicator';ind.innerHTML='<span></span><span></span><span></span>';area.appendChild(ind);scrollToBottom();}
+function hideTyping(){const el=document.getElementById('typingIndicator');if(el)el.remove();}
+function scrollToBottom(){setTimeout(()=>window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'}),100);}
+function autoResize(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,120)+'px';}
+function quickQuery(t){const inp=document.getElementById('queryInput');inp.value=t;autoResize(inp);document.getElementById('btnSend').disabled=false;handleSend();}
+
+// ===================== SEND (AI-FIRST, OFFLINE ONLY FOR STRUCTURAL) =====================
+async function handleSend(){
+  const inp=document.getElementById('queryInput');const query=inp.value.trim();if(!query||isProcessing)return;
+  if(!getActiveConv())createNewConversation(true);
+  isProcessing=true;inp.value='';inp.style.height='auto';document.getElementById('btnSend').disabled=true;
+  addMessage('user',escapeHtml(query));showTyping();
+  try{
+    const ln=detectDataset(query);
+    const ck=cacheKey(query,ln);
+    if(responseCache[ck]){hideTyping();addMessage('assistant',responseCache[ck]);isProcessing=false;return;}
+
+    let response;
+    if(!ln){
+      // No league detected → Gemini for general/conceptual, or offline fallback
+      if(apiKey){
+        response=await queryGeminiGeneral(query);
+      } else {
+        response=buildNoLeagueOffline();
+      }
+    } else {
+      const data=loadedDatasets[ln];
+      if(!data){response=`❌ Los datos de <strong>${ln}</strong> no pudieron cargarse.`;}
+      else {
+        const conv=getActiveConv();if(conv&&!conv.leagueEmoji){conv.leagueEmoji=DATASETS_CONFIG.find(d=>d.name===ln)?.emoji||'💬';saveConvs();}
+        const simple=isSimpleOfflineQuery(query);
+
+        if(simple){
+          // Pure structural query → offline handles it perfectly
+          const offlineResult=queryOffline(query,ln,data);
+          response=offlineResult.html;
+        } else if(apiKey){
+          // Everything else → Gemini with pre-filtered data
+          response=await queryWithGemini(query,ln,data);
+        } else {
+          // No API key → offline as best-effort fallback
+          const offlineResult=queryOffline(query,ln,data);
+          response=offlineResult.html;
+        }
+      }
+    }
+    responseCache[ck]=response;
+    hideTyping();addMessage('assistant',response);
+  }catch(err){hideTyping();addMessage('assistant',`❌ Error: ${escapeHtml(err.message)}`);}
+  isProcessing=false;
+}
+
+// ===================== NO LEAGUE =====================
+function buildNoLeagueOffline(){return `🤔 No detecté a qué liga querés consultar:<br><br>`+DATASETS_CONFIG.map(d=>{const ds=loadedDatasets[d.name];return `${d.emoji} <strong>${d.name}</strong>`+(ds?` (${ds.length} jug.)`:``);}).join('<br>')+`<br><br>Mencioná el nombre de la liga en tu consulta.`;}
+
+// ===================== UTILITIES =====================
+function analyzeColumns(data){
+  const columns=Object.keys(data[0]||{});
+  const numCols=columns.filter(col=>data.slice(0,20).some(r=>typeof r[col]==='number'||(!isNaN(parseFloat(r[col]))&&r[col]!==null&&r[col]!=='')));
+  const nameCol=columns.find(c=>/jugador|player|nombre|name/i.test(c))||columns[0];
+  const equipoCol=columns.find(c=>/equipo|team|club/i.test(c));
+  const skipCols=new Set([nameCol,equipoCol].filter(Boolean).map(c=>c.toLowerCase()));
+  const candidateCols=numCols.filter(c=>!skipCols.has(c.toLowerCase()));
+  return {columns,numCols,nameCol,equipoCol,candidateCols};
+}
+function stripHtml(html){const d=document.createElement('div');d.innerHTML=html;return (d.textContent||d.innerText||'').substring(0,200);}
+// Offline SOLO maneja consultas puramente estructurales/mecánicas.
+// Cualquier lenguaje subjetivo/analítico va a Gemini.
+function isSimpleOfflineQuery(q){
+  const t=q.trim();
+  // Structural info queries
+  if(/^(cuántos|cuantos|cantidad|total de jugadores|columnas|campos|qué datos|que datos|variables|resumen|summary|overview|qué ligas|que ligas)/i.test(t)) return true;
+  // Exact player/team lookup
+  if(/^(datos de|info de|estadísticas de|stats de|decime sobre|buscar a|buscar)\s+/i.test(t)) return true;
+  if(/^(jugadores de|plantel de|equipo)\s+/i.test(t)) return true;
+  // Simple "promedio de X"
+  if(/^promedio\s+(de|del)\s+/i.test(t)) return true;
+  // "top N por/de/en X" WITHOUT subjective language after
+  if(/^top\s+\d+\s+(por|de|en)\s+/i.test(t) && !/que sea|tipo|perfil|estilo|mejor|peor|como|parecido|similar/i.test(t)) return true;
+  return false;
+}
+function buildMultiLeagueSummary(){
+  const ligas=[];
+  for(const ds of DATASETS_CONFIG){
+    const d=loadedDatasets[ds.name];if(!d)continue;
+    const a=analyzeColumns(d);
+    ligas.push({n:ds.name.replace(/ 2025$/,''),j:d.length,c:a.candidateCols.slice(0,8)});
+  }
+  return JSON.stringify({ligas});
+}
+
+// ===================== RESPONSE CACHE =====================
+const responseCache={};
+function cacheKey(q,ln){return (q.toLowerCase().trim()+'||'+(ln||'')).substring(0,120);}
+
+// ===================== COLUMN DETECTION ENGINE =====================
+function detectTargetColumn(q, candidateCols){
+  if(!candidateCols.length) return {col:null, matched:false};
+  const synonyms={'para':'hacia','porcentaje':'%','percent':'%','precision':'precisin','porciento':'%','promedio':'media','ataque':'atacante','defensa':'defensiv','amarilla':'amarill','roja':'roj','gol':'goles','asistencia':'asist','pase':'pases','tiro':'remat','cabeza':'cabeza','duelo':'duelos','falta':'faltas','carrera':'carreras','centro':'centros','regate':'regates','corner':'crner','penal':'penalti','intercepcion':'interceptacion','entrada':'entradas','corto':'cortos','largo':'largos','lateral':'laterales','profundidad':'profundidad','progresivo':'progresivos','adelante':'adelante','atras':'atrs','libre':'libres','desmarque':'desmarques','clave':'claves','ultimo':'ltimo','tercio':'tercio','area':'rea','delante':'adelante'};
+  const qWords=q.replace(/[,?¿!¡]/g,' ').split(/\s+/).filter(w=>w.length>1);
+  const expandedWords=new Set(qWords);
+  for(const w of qWords){if(synonyms[w])expandedWords.add(synonyms[w]);}
+  const wantsPercent=/porcentaje|porciento|precisión|precision|%|eficacia|efectividad|ratio|tasa/i.test(q);
+  const wants90=/\/90|por 90|sobre 90|cada 90|en 90/i.test(q);
+  let best=null;let bestScore=-1;
+  for(const col of candidateCols){
+    const cl=col.toLowerCase();
+    const colWords=cl.replace(/[\/\(\),]/g,' ').replace(/%/g,' % ').split(/\s+/).filter(w=>w.length>1);
+    let wordMatches=0;
+    for(const cw of colWords){for(const qw of expandedWords){if(cw.includes(qw)||qw.includes(cw)){wordMatches++;break;}}}
+    if(wordMatches===0) continue;
+    let score=wordMatches/Math.max(colWords.length,1);
+    if(wantsPercent && cl.includes('%')) score+=2;
+    if(wantsPercent && !cl.includes('%')) score-=0.5;
+    if(wants90 && cl.includes('/90')) score+=1.5;
+    if(!wantsPercent && cl.includes('%') && candidateCols.some(c=>!c.toLowerCase().includes('%')&&colWords.some(cw=>c.toLowerCase().includes(cw)))) score-=0.3;
+    score+=wordMatches*0.3;
+    if(score>bestScore){bestScore=score;best=col;}
+  }
+  if(best && bestScore>0.3) return {col:best, matched:true};
+  return {col:candidateCols[0], matched:false};
+}
+
+// ===================== FILTER EXTRACTION ENGINE =====================
+function extractFilters(q, candidateCols){
+  const filters=[];
+  // Patterns: "con más de 400 minutos jugados", "al menos 10 partidos", "mayores de 25 años"
+  const simplePatterns=[
+    {re:/(?:con\s+)?(?:más|mas)\s+de\s+(\d+[\d.,]*)\s+([a-záéíóúñü][a-záéíóúñü\s]{1,30})/gi, op:'>'},
+    {re:/(?:con\s+)?(?:al\s+menos|mínimo|minimo)\s+(\d+[\d.,]*)\s+([a-záéíóúñü][a-záéíóúñü\s]{1,30})/gi, op:'>='},
+    {re:/(?:con\s+)?(?:menos|menor)\s+de\s+(\d+[\d.,]*)\s+([a-záéíóúñü][a-záéíóúñü\s]{1,30})/gi, op:'<'},
+    {re:/(?:mayor(?:es)?)\s+de\s+(\d+[\d.,]*)\s+(años?|edad)/gi, op:'>'},
+    {re:/(?:menor(?:es)?)\s+de\s+(\d+[\d.,]*)\s+(años?|edad)/gi, op:'<'},
+  ];
+  for(const{re,op}of simplePatterns){
+    let m;re.lastIndex=0;
+    while((m=re.exec(q))!==null){
+      const val=parseFloat(m[1].replace(',','.'));
+      // Clean the hint: remove trailing noise words and league references
+      let hint=m[2].trim().toLowerCase()
+        .replace(/\s+(de la|en la|del|de el|que|y)\s*.*$/,'')
+        .replace(/\s+$/,'');
+      if(isNaN(val)||!hint||hint.length<3) continue;
+      const colMatch=detectTargetColumn(hint, candidateCols);
+      if(colMatch.matched) filters.push({col:colMatch.col, op, val});
+    }
+  }
+  return filters;
+}
+function applyFilters(data, filters){
+  if(!filters.length) return data;
+  return data.filter(r=>{
+    for(const f of filters){
+      const v=parseFloat(r[f.col]);
+      if(isNaN(v)) return false;
+      if(f.op==='>'&&!(v>f.val)) return false;
+      if(f.op==='>='&&!(v>=f.val)) return false;
+      if(f.op==='<'&&!(v<f.val)) return false;
+      if(f.op==='<='&&!(v<=f.val)) return false;
+    }
+    return true;
+  });
+}
+function describeFilters(filters){
+  if(!filters.length) return '';
+  return '<br><em>Filtros: '+filters.map(f=>`${f.col} ${f.op} ${f.val}`).join(', ')+'</em>';
+}
+
+// ===================== OFFLINE QUERY (retorna {confident, html}) =====================
+function queryOffline(query,leagueName,data){
+  const q=query.toLowerCase();
+  const {columns,numCols,nameCol,equipoCol,candidateCols}=analyzeColumns(data);
+
+  // ========= DETECCIÓN DE COLUMNA INTELIGENTE =========
+  const colResult = detectTargetColumn(q, candidateCols);
+  const targetCol = colResult.col;
+  const keywordMatched = colResult.matched;
+
+  // Extraer N para "top N" — ignorar años (4 dígitos)
+  function extractCount(){
+    // "Quién fue el jugador..." / "cuál fue el..." → singular = 1
+    if(/^(quién|quien|cuál|cual) (fue|es|era)\s+(el|la)\b/i.test(q)) return 1;
+    const topMatch=q.match(/top\s*(\d{1,3})\b/i);
+    if(topMatch) return parseInt(topMatch[1]);
+    const nums=[...q.matchAll(/\b(\d{1,3})\b/g)].map(m=>parseInt(m[1])).filter(n=>n>=1&&n<=200);
+    return nums[0]||10;
+  }
+
+  // ========= EXTRAER FILTROS (ej: "con más de 400 minutos jugados") =========
+  const filters=extractFilters(q, candidateCols);
+  const filteredData=applyFilters(data, filters);
+  const filterNote=describeFilters(filters);
+
+  // TOP / RANKING / QUIÉN
+  if(/top|más|mayor|mejor|máximo|ranking|max|líder|lider|quién fue|quien fue|cuál fue|cual fue/i.test(q)){
+    const n=extractCount();
+    if(targetCol && keywordMatched){
+      const sorted=[...filteredData].sort((a,b)=>(parseFloat(b[targetCol])||0)-(parseFloat(a[targetCol])||0));
+      const showEquipo=equipoCol && targetCol!==equipoCol;
+      let html=`<strong>🏆 Top ${n} por ${targetCol} — ${leagueName}</strong>${filterNote}<br><table><thead><tr><th>#</th><th>${nameCol}</th>${showEquipo?`<th>Equipo</th>`:''}<th>${targetCol}</th></tr></thead><tbody>`;
+      sorted.slice(0,n).forEach((r,i)=>{html+=`<tr><td>${i+1}</td><td>${r[nameCol]??'—'}</td>${showEquipo?`<td>${r[equipoCol]??'—'}</td>`:''}<td>${r[targetCol]??'—'}</td></tr>`;});
+      return {confident:true, html:html+'</tbody></table>'};
+    }
+  }
+  // PROMEDIO
+  if(/promedio|media|average|avg/i.test(q)&&targetCol&&keywordMatched){
+    const vals=filteredData.map(r=>parseFloat(r[targetCol])).filter(v=>!isNaN(v));
+    if(vals.length) return {confident:true, html:`📊 Promedio de <strong>${targetCol}</strong> en <strong>${leagueName}</strong>: <strong>${(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(2)}</strong> (${vals.length} jugadores).${filterNote}`};
+  }
+  // MÍNIMO
+  if(/mínimo|minimo|menor|peor|bajo/i.test(q)&&targetCol&&keywordMatched){
+    const n=extractCount();
+    const sorted=[...filteredData].sort((a,b)=>(parseFloat(a[targetCol])||0)-(parseFloat(b[targetCol])||0)).filter(r=>parseFloat(r[targetCol])>0);
+    const showEquipo=equipoCol && targetCol!==equipoCol;
+    let html=`<strong>📉 Menor ${n} por ${targetCol} — ${leagueName}</strong>${filterNote}<br><table><thead><tr><th>#</th><th>${nameCol}</th>${showEquipo?`<th>Equipo</th>`:''}<th>${targetCol}</th></tr></thead><tbody>`;
+    sorted.slice(0,n).forEach((r,i)=>{html+=`<tr><td>${i+1}</td><td>${r[nameCol]??'—'}</td>${showEquipo?`<td>${r[equipoCol]??'—'}</td>`:''}<td>${r[targetCol]??'—'}</td></tr>`;});
+    return {confident:true, html:html+'</tbody></table>'};
+  }
+  // JUGADOR ESPECÍFICO
+  const jugadorMatch=q.match(/(?:datos de|info de|estadísticas de|stats de|decime sobre|buscar a|buscar)\s+(.+)/i);
+  if(jugadorMatch){
+    const nombre=jugadorMatch[1].trim().toLowerCase();
+    const found=data.filter(r=>(r[nameCol]||'').toLowerCase().includes(nombre));
+    if(found.length>0){
+      let html=`<strong>🔍 "${jugadorMatch[1]}" — ${leagueName}</strong><br>`;
+      found.slice(0,5).forEach(r=>{html+=`<table><tbody>`;for(const[k,v]of Object.entries(r)){if(v!==null&&v!=='')html+=`<tr><td><strong>${k}</strong></td><td>${v}</td></tr>`;}html+=`</tbody></table><br>`;});
+      return {confident:true, html};
+    }
+  }
+  // POR EQUIPO
+  if(equipoCol&&/equipo|club|plantel|jugadores de/i.test(q)){
+    const equipoWords=q.replace(/.*(?:equipo|club|plantel|jugadores de)\s*/i,'').trim().replace(/de la .*/,'').trim();
+    if(equipoWords.length>2){
+      const found=data.filter(r=>(r[equipoCol]||'').toLowerCase().includes(equipoWords));
+      if(found.length>0){
+        let html=`<strong>👥 ${found.length} jugadores — "${equipoWords}" — ${leagueName}</strong><br><table><thead><tr><th>${nameCol}</th>${numCols.slice(0,3).map(c=>`<th>${c}</th>`).join('')}</tr></thead><tbody>`;
+        found.forEach(r=>{html+=`<tr><td>${r[nameCol]??'—'}</td>${numCols.slice(0,3).map(c=>`<td>${r[c]??'—'}</td>`).join('')}</tr>`;});
+        return {confident:true, html:html+'</tbody></table>'};
+      }
+    }
+  }
+  // CONTAR
+  if(/cuántos|cuantos|cantidad|total de jugadores/i.test(q)){
+    return {confident:true, html:`📋 <strong>${leagueName}</strong> tiene <strong>${data.length}</strong> jugadores registrados.`};
+  }
+  // RESUMEN
+  if(/resumen|summary|general|overview/i.test(q)){
+    let html=`<strong>📋 ${leagueName}</strong><br>Jugadores: <strong>${data.length}</strong><br>`;
+    for(const col of numCols.slice(0,6)){const vals=data.map(r=>parseFloat(r[col])).filter(v=>!isNaN(v));if(!vals.length)continue;html+=`<strong>${col}</strong>: avg ${(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(2)} · max ${Math.max(...vals)}<br>`;}
+    return {confident:true, html};
+  }
+  // COLUMNAS
+  if(/columnas|campos|qué datos|que datos|variables/i.test(q)){
+    return {confident:true, html:`📋 Columnas en <strong>${leagueName}</strong>:<br>${columns.map(c=>`• <code>${c}</code>`).join('<br>')}`};
+  }
+  // NO PUDO — marca no confident para que Gemini intente si hay API key
+  return {confident:false, html:`🤔 No pude resolver eso localmente. Probá: <em>"Top 10 goleadores de la ${leagueName}"</em> o <em>"Promedio de edad de la ${leagueName}"</em>.`};
+}
+
+// ===================== GEMINI — OPTIMIZED TOKEN USAGE =====================
+const SYS_INSTRUCTION='Analista fútbol argentino experto en scouting y perfilado táctico. Respondé HTML puro (strong,table,tr,th,td,br,em,ul,li,p). Español. Conciso y preciso. Datos=arrays: h=headers,r=rows. S=stats: n=min,x=max,a=avg. F=filtros ya aplicados a los datos. Q=consulta del usuario. Cuando te pidan perfiles tácticos (ej: 9 tanque, mediocampista creativo, lateral ofensivo), elegí las columnas más relevantes al perfil de los datos proporcionados (ej: para un 9 tanque priorizá goles, duelos aéreos ganados, tiros, cabezazos; para un creativo priorizá asistencias, pases clave, xA). Siempre justificá tu elección con los datos.';
+
+function getHistoryContents(){
+  const conv=getActiveConv();if(!conv||conv.history.length===0) return [];
+  return conv.history.slice(-3).map(m=>({
+    role:m.role==='user'?'user':'model',
+    parts:[{text:stripHtml(m.html)}]
+  }));
+}
+
+
+function buildCompactData(query,leagueName,data){
+  const {columns,numCols,nameCol,equipoCol,candidateCols}=analyzeColumns(data);
+  const totalRows=data.length;
+
+  // Pre-filter data using extractFilters
+  const filters=extractFilters(query.toLowerCase(),candidateCols);
+  const filtered=applyFilters(data,filters);
+  const filterDesc=filters.map(f=>`${f.col}${f.op}${f.val}`).join(',');
+
+  // Detect primary sort column (best-effort for ordering)
+  const colResult=detectTargetColumn(query.toLowerCase(),candidateCols);
+  const sortCol=colResult.col||candidateCols[0]||numCols[0];
+
+  // Send ALL columns for top rows so Gemini can pick the right ones for the profile
+  const topN=Math.min(filtered.length,15);
+  const sorted=[...filtered].sort((a,b)=>(parseFloat(b[sortCol])||0)-(parseFloat(a[sortCol])||0));
+  const allCols=[nameCol,equipoCol,...numCols].filter(Boolean);
+  // Deduplicate
+  const headerCols=[...new Set(allCols)];
+  const h=headerCols.map(c=>c.length>20?c.substring(0,20):c);
+  const r=sorted.slice(0,topN).map(row=>headerCols.map(c=>row[c]??''));
+
+  // Compact stats for all numeric columns (Gemini needs full picture)
+  const S={};
+  for(const col of candidateCols.slice(0,12)){
+    const vals=filtered.map(r=>parseFloat(r[col])).filter(v=>!isNaN(v));
+    if(vals.length) S[col.length>20?col.substring(0,20):col]={n:Math.min(...vals),x:Math.max(...vals),a:+(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(2)};
+  }
+
+  const maxTokens=8192;
+
+  // Build minimal prompt — send all column names so Gemini knows what's available
+  let prompt=`L:"${leagueName}" R:${totalRows} FR:${filtered.length}`;
+  prompt+=`\nC:${columns.join(',')}`;
+  prompt+=`\nS:${JSON.stringify(S)}`;
+  prompt+=`\nT:${JSON.stringify({h,r})}`;
+  if(filterDesc) prompt+=`\nF:${filterDesc}`;
+  prompt+=`\nQ:${query}`;
+
+  return {prompt,maxTokens};
+}
+
+async function queryWithGemini(query,leagueName,data){
+  const {prompt,maxTokens}=buildCompactData(query,leagueName,data);
+  const history=getHistoryContents();
+  const userMsg={role:'user',parts:[{text:prompt}]};
+  const contents=[...history,userMsg];
+  return await callGeminiRaw(contents,{maxTokens});
+}
+
+async function queryGeminiGeneral(query){
+  const summary=buildMultiLeagueSummary();
+  const mentionsData=/jugador|gol|asist|equipo|club|pase|tiro|minuto|comparar|compará/i.test(query);
+  const maxTokens=mentionsData?4096:2048;
+  const prompt=`Ligas:${summary}\nQ:${query}`;
+  const history=getHistoryContents();
+  const userMsg={role:'user',parts:[{text:prompt}]};
+  const contents=[...history,userMsg];
+  return await callGeminiRaw(contents,{maxTokens});
+}
+async function callGeminiRaw(contents,opts={}){
+  const maxTokens=opts.maxTokens||4096;
+  const body=JSON.stringify({
+    systemInstruction:{parts:[{text:SYS_INSTRUCTION}]},
+    contents,
+    generationConfig:{temperature:0.3,maxOutputTokens:maxTokens}
+  });
+  const url=`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+  const resp=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body});
+  if(!resp.ok){
+    const err=await resp.json().catch(()=>({}));const msg=err?.error?.message||'';
+    if(resp.status===429||/quota|rate.?limit/i.test(msg)){
+      const wait=parseFloat(msg.match(/retry in ([\d.]+)/i)?.[1]||'3');
+      await new Promise(r=>setTimeout(r,(wait+1)*1000));
+      const r2=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body});
+      if(r2.ok){const d=await r2.json();return d.candidates?.[0]?.content?.parts?.map(p=>p.text||'').join('')||'(sin respuesta)';}
+      throw new Error('⏳ Cuota de Gemini agotada. Esperá unos minutos o usá consultas offline (top, promedio, resumen).');
+    }
+    if([400,401,403].includes(resp.status)){apiKey='';try{localStorage.removeItem('fstats_gemini_key');}catch(e){}updateApiStatus(false);document.getElementById('noAiNotice').classList.add('visible');throw new Error('API key inválida. Reconfigurala.');}
+    throw new Error(msg||`Error ${resp.status}`);
+  }
+  const data=await resp.json();return data.candidates?.[0]?.content?.parts?.map(p=>p.text||'').join('')||'(sin respuesta)';
+}
+function escapeHtml(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+</script>
+
+</body>
+</html>
+
