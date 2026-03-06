@@ -257,15 +257,33 @@
 </div>
 
 <script>
+// ╔══════════════════════════════════════════════════════════════╗
+// ║  FútbolStats AI — Optimized v2.0                           ║
+// ║  Persistent cache · Fuzzy league detection · Smart data    ║
+// ║  slicing · Pre-computed summaries · Multi-league support   ║
+// ╚══════════════════════════════════════════════════════════════╝
+
+// ===================== CONFIG =====================
 const DATASETS_CONFIG = [
-  { name:'Liga Profesional 2025', file:'Liga Profesional 2025.xlsx', keywords:['liga profesional','liga prof','profesional'], emoji:'🏆' },
-  { name:'Primera B Metro 2025', file:'Primera B Metro 2025.xlsx', keywords:['primera b','b metro','metro'], emoji:'🥈' },
-  { name:'Primera Nacional 2025', file:'Primera Nacional 2025.xlsx', keywords:['primera nacional','nacional'], emoji:'🥉' },
-  { name:'Torneo Federal A 2025', file:'Torneo Federal A 2025.xlsx', keywords:['federal a','federal','torneo federal'], emoji:'🌐' },
-  { name:'Torneo Proyeccion 2025', file:'Torneo Proyeccion 2025.xlsx', keywords:['proyeccion','proyección','torneo proyeccion','torneo proyección'], emoji:'🌟' }
+  { name:'Liga Profesional 2025', file:'Liga Profesional 2025.xlsx',
+    keywords:['liga profesional','liga prof','profesional','lpf','lp'],
+    abbrevs:['prof','lpf','lp','lig prof'], emoji:'🏆' },
+  { name:'Primera B Metro 2025', file:'Primera B Metro 2025.xlsx',
+    keywords:['primera b','b metro','metro','primera b metro'],
+    abbrevs:['bmetro','b met','metro','prim b'], emoji:'🥈' },
+  { name:'Primera Nacional 2025', file:'Primera Nacional 2025.xlsx',
+    keywords:['primera nacional','nacional','prim nacional'],
+    abbrevs:['nac','nacional','pnac','p nac','prim nac'], emoji:'🥉' },
+  { name:'Torneo Federal A 2025', file:'Torneo Federal A 2025.xlsx',
+    keywords:['federal a','federal','torneo federal'],
+    abbrevs:['fed','fed a','federal','tfa'], emoji:'🌐' },
+  { name:'Torneo Proyeccion 2025', file:'Torneo Proyeccion 2025.xlsx',
+    keywords:['proyeccion','proyección','torneo proyeccion','torneo proyección'],
+    abbrevs:['proy','proyec','tp','t proy'], emoji:'🌟' }
 ];
 const GEMINI_MODEL = 'gemini-2.5-flash';
 const loadedDatasets = {};
+const datasetSummaries = {};  // Pre-computed stats per league
 let apiKey = '';
 let isProcessing = false;
 let recognition = null;
@@ -273,9 +291,240 @@ let isListening = false;
 let conversations = [];
 let activeConvId = null;
 
+// ===================== CACHE MANAGER (Persistent LRU) =====================
+const CacheManager = {
+  MAX_ENTRIES: 50,
+  TTL_MS: 24 * 60 * 60 * 1000, // 24h
+  STORAGE_KEY: 'fstats_cache_v3',
+
+  _normalize(q) {
+    return q.toLowerCase().trim()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')  // strip accents
+      .replace(/[¿?¡!.,;:'"()]/g, '')                     // strip punctuation
+      .replace(/\b(el|la|los|las|de|del|en|un|una|por|con|que|y|o|a)\b/g, '') // strip stopwords
+      .replace(/\s+/g, ' ').trim();
+  },
+
+  _key(query, leagues) {
+    const norm = this._normalize(query);
+    const ln = Array.isArray(leagues) ? leagues.sort().join('+') : (leagues || '');
+    return (norm + '||' + ln).substring(0, 150);
+  },
+
+  _load() {
+    try {
+      const raw = localStorage.getItem(this.STORAGE_KEY);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      const now = Date.now();
+      // Purge expired
+      for (const k of Object.keys(parsed)) {
+        if (now - (parsed[k].ts || 0) > this.TTL_MS) delete parsed[k];
+      }
+      return parsed;
+    } catch (e) { return {}; }
+  },
+
+  _save(cache) {
+    try {
+      // LRU eviction
+      const entries = Object.entries(cache).sort((a, b) => (b[1].ts || 0) - (a[1].ts || 0));
+      const trimmed = Object.fromEntries(entries.slice(0, this.MAX_ENTRIES));
+      localStorage.setItem(this.STORAGE_KEY, JSON.stringify(trimmed));
+    } catch (e) { /* storage full — clear old */ try { localStorage.removeItem(this.STORAGE_KEY); } catch (e2) {} }
+  },
+
+  get(query, leagues) {
+    const cache = this._load();
+    const k = this._key(query, leagues);
+    const entry = cache[k];
+    if (entry && (Date.now() - (entry.ts || 0) < this.TTL_MS)) {
+      entry.ts = Date.now(); // refresh access time
+      this._save(cache);
+      return entry.v;
+    }
+    return null;
+  },
+
+  set(query, leagues, value) {
+    const cache = this._load();
+    const k = this._key(query, leagues);
+    cache[k] = { v: value, ts: Date.now() };
+    this._save(cache);
+  }
+};
+
+// ===================== TEXT UTILS =====================
+function escapeHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function stripHtml(html) { const d = document.createElement('div'); d.innerHTML = html; return (d.textContent || d.innerText || '').substring(0, 250); }
+function slugify(s) { return s.toLowerCase().replace(/[^a-z0-9]/g, '_'); }
+function removeAccents(s) { return s.normalize('NFD').replace(/[\u0300-\u036f]/g, ''); }
+
+// ===================== FUZZY LEAGUE DETECTION (multi-league) =====================
+function detectDatasets(query) {
+  const q = removeAccents(query.toLowerCase().trim());
+  const matches = [];
+
+  for (const ds of DATASETS_CONFIG) {
+    let score = 0;
+    // Exact keyword match (highest priority)
+    for (const kw of ds.keywords) {
+      if (q.includes(removeAccents(kw))) { score = Math.max(score, 10 + kw.length); }
+    }
+    // Abbreviation match
+    if (score === 0) {
+      for (const ab of (ds.abbrevs || [])) {
+        const abNorm = removeAccents(ab);
+        // Match as whole word
+        const re = new RegExp('\\b' + abNorm.replace(/\s+/g, '\\s*') + '\\b', 'i');
+        if (re.test(q)) { score = Math.max(score, 5 + ab.length); }
+      }
+    }
+    // Fuzzy: check if 2+ consecutive words from the league name appear
+    if (score === 0) {
+      const nameWords = removeAccents(ds.name.replace(/\d+/g, '')).toLowerCase().split(/\s+/).filter(w => w.length > 2);
+      let matched = 0;
+      for (const w of nameWords) { if (q.includes(w)) matched++; }
+      if (matched >= 2) score = matched;
+    }
+    if (score > 0) matches.push({ name: ds.name, score });
+  }
+
+  // Sort by score descending
+  matches.sort((a, b) => b.score - a.score);
+  return matches.map(m => m.name);
+}
+
+// Single-league compat wrapper
+function detectDataset(query) {
+  const found = detectDatasets(query);
+  return found.length > 0 ? found[0] : null;
+}
+
+// ===================== COLUMN ANALYSIS =====================
+function analyzeColumns(data) {
+  const columns = Object.keys(data[0] || {});
+  const numCols = columns.filter(col => data.slice(0, 30).some(r => typeof r[col] === 'number' || (!isNaN(parseFloat(r[col])) && r[col] !== null && r[col] !== '')));
+  const nameCol = columns.find(c => /jugador|player|nombre|name/i.test(c)) || columns[0];
+  const equipoCol = columns.find(c => /equipo|team|club/i.test(c));
+  // Detect position column — handle broken encoding (Posicin instead of Posición)
+  const posCol = columns.find(c => /posici[oó]n|posicin|position|pos\b/i.test(removeAccents(c)));
+  const pos2Col = columns.find(c => /segunda\s*posici|second.*pos/i.test(removeAccents(c)));
+  const pos3Col = columns.find(c => /posicion\s*extra|tercera\s*pos/i.test(removeAccents(c)));
+  const edadCol = columns.find(c => /edad|age|a[ñn]os/i.test(c));
+  // Detect country/passport columns
+  const paisCol = columns.find(c => /pa[ií]s.*nacimiento|country/i.test(removeAccents(c)));
+  const pieCol = columns.find(c => /^pie$|foot/i.test(c.trim()));
+  const alturaCol = columns.find(c => /altura|height/i.test(c));
+  const skipCols = new Set([nameCol, equipoCol].filter(Boolean).map(c => c.toLowerCase()));
+  const candidateCols = numCols.filter(c => !skipCols.has(c.toLowerCase()));
+  // Categorize defensive, offensive, passing columns for easy access
+  const defensiveCols = columns.filter(c => /defensiv|entrada|intercep|tiro.*intercep|bloqueo|despe|falta/i.test(removeAccents(c)));
+  const attackCols = columns.filter(c => /ataque|gol|remat|tiro|xg|cabeza|regate|duel.*atac|toques.*area|aceler|carrer.*progres/i.test(removeAccents(c)));
+  const passCols = columns.filter(c => /pase|centro|asist|clave|profund|progresiv|ltimo.*tercio|ultimo.*tercio/i.test(removeAccents(c)));
+  return { columns, numCols, nameCol, equipoCol, posCol, pos2Col, pos3Col, edadCol, paisCol, pieCol, alturaCol, candidateCols, defensiveCols, attackCols, passCols };
+}
+
+// ===================== PRE-COMPUTE DATASET SUMMARIES =====================
+function buildDatasetSummary(leagueName, data) {
+  const { columns, numCols, nameCol, equipoCol, posCol, pos2Col, pos3Col, edadCol, candidateCols, defensiveCols, attackCols, passCols } = analyzeColumns(data);
+
+  // Teams list
+  const teams = equipoCol ? [...new Set(data.map(r => r[equipoCol]).filter(Boolean))].sort() : [];
+
+  // Positions distribution (combining all position columns)
+  const posDistrib = {};
+  if (posCol) data.forEach(r => { const p = r[posCol]; if (p) posDistrib[p] = (posDistrib[p] || 0) + 1; });
+
+  // Stats per numeric column
+  const colStats = {};
+  for (const col of candidateCols) {
+    const vals = data.map(r => parseFloat(r[col])).filter(v => !isNaN(v));
+    if (!vals.length) continue;
+    vals.sort((a, b) => a - b);
+    const sum = vals.reduce((a, b) => a + b, 0);
+    const avg = sum / vals.length;
+    const median = vals.length % 2 === 0
+      ? (vals[vals.length / 2 - 1] + vals[vals.length / 2]) / 2
+      : vals[Math.floor(vals.length / 2)];
+    colStats[col] = {
+      min: vals[0],
+      max: vals[vals.length - 1],
+      avg: +avg.toFixed(2),
+      med: +median.toFixed(2),
+      sum: +sum.toFixed(1),
+      cnt: vals.length
+    };
+  }
+
+  // Top 3 per column (precomputed for common queries)
+  const topPerCol = {};
+  for (const col of candidateCols.slice(0, 20)) {
+    const sorted = [...data].sort((a, b) => (parseFloat(b[col]) || 0) - (parseFloat(a[col]) || 0));
+    topPerCol[col] = sorted.slice(0, 3).map(r => ({
+      name: r[nameCol] || '—',
+      team: equipoCol ? (r[equipoCol] || '—') : undefined,
+      val: r[col]
+    }));
+  }
+
+  return {
+    league: leagueName,
+    totalPlayers: data.length,
+    columns,
+    numericColumns: candidateCols,
+    nameCol, equipoCol, posCol, pos2Col, pos3Col, edadCol,
+    teams,
+    posDistrib,
+    colStats,
+    topPerCol,
+    hasPosition: !!posCol,
+    hasDefensiveMetrics: defensiveCols.length > 0,
+    defensiveCols,
+    attackCols,
+    passCols
+  };
+}
+
+// Build a compact string for the system instruction (sent once per conversation context)
+function buildSystemDataContext() {
+  const parts = [];
+  for (const ds of DATASETS_CONFIG) {
+    const s = datasetSummaries[ds.name];
+    if (!s) continue;
+    const shortName = ds.name.replace(/ 2025$/, '');
+    const topCols = s.numericColumns.slice(0, 25).join(',');
+    const teamCount = s.teams.length;
+    let line = `${ds.emoji}${shortName}:${s.totalPlayers}jug,${teamCount}eq`;
+    line += `|cols:${topCols}`;
+    // Add position info
+    if (s.hasPosition) {
+      line += `|POSICIÓN DISPONIBLE:${s.posCol}`;
+      if (s.pos2Col) line += `,${s.pos2Col}`;
+      if (s.pos3Col) line += `,${s.pos3Col}`;
+    }
+    // Add position distribution if available
+    if (Object.keys(s.posDistrib).length > 0) {
+      line += `|pos:${Object.entries(s.posDistrib).map(([k, v]) => `${k}:${v}`).join(',')}`;
+    }
+    // Inform about defensive metrics
+    if (s.hasDefensiveMetrics) {
+      line += `|MÉTRICAS DEFENSIVAS:${s.defensiveCols.slice(0,8).join(',')}`;
+    }
+    // All column names (so Gemini knows everything available)
+    line += `|TODAS_COLS:${s.columns.join(',')}`;
+    parts.push(line);
+  }
+  return parts.join('\n');
+}
+
 // ===================== INIT =====================
 document.addEventListener('DOMContentLoaded', async () => {
-  try { const s = localStorage.getItem('fstats_gemini_key'); if (s) { apiKey=s; updateApiStatus(true); } else { document.getElementById('noAiNotice').classList.add('visible'); } } catch(e) {}
+  try {
+    const s = localStorage.getItem('fstats_gemini_key');
+    if (s) { apiKey = s; updateApiStatus(true); }
+    else { document.getElementById('noAiNotice').classList.add('visible'); }
+  } catch (e) {}
   loadConversationsFromStorage();
   renderLeagueBadges();
   document.getElementById('loadingBar').classList.add('visible');
@@ -283,458 +532,911 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('loadingBar').classList.remove('visible');
   if (conversations.length === 0) createNewConversation(true);
   else setActiveConversation(conversations[0].id);
-  document.getElementById('queryInput').addEventListener('keydown', e => { if (e.key==='Enter'&&!e.shiftKey){e.preventDefault();handleSend();} });
-  document.getElementById('queryInput').addEventListener('input', () => { document.getElementById('btnSend').disabled=!document.getElementById('queryInput').value.trim(); });
+  document.getElementById('queryInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
+  });
+  document.getElementById('queryInput').addEventListener('input', () => {
+    document.getElementById('btnSend').disabled = !document.getElementById('queryInput').value.trim();
+  });
   initSpeechRecognition();
 });
 
 // ===================== CONVERSATIONS =====================
 function loadConversationsFromStorage() {
-  try { const r=localStorage.getItem('fstats_conversations'); if(r) conversations=JSON.parse(r); } catch(e){conversations=[];}
+  try { const r = localStorage.getItem('fstats_conversations'); if (r) conversations = JSON.parse(r); } catch (e) { conversations = []; }
   renderConvList();
 }
-function saveConvs() { try{localStorage.setItem('fstats_conversations',JSON.stringify(conversations));}catch(e){} }
+function saveConvs() { try { localStorage.setItem('fstats_conversations', JSON.stringify(conversations)); } catch (e) {} }
+
 function createNewConversation(silent) {
-  const id=Date.now().toString();
-  conversations.unshift({id, title:'Nueva consulta', history:[], leagueEmoji:null, createdAt:Date.now()});
+  const id = Date.now().toString();
+  conversations.unshift({ id, title: 'Nueva consulta', history: [], leagueEmoji: null, createdAt: Date.now() });
   saveConvs(); setActiveConversation(id);
-  if(!silent) addMessage('assistant',`⚽ <strong>Nueva conversación.</strong><br>Tengo cargadas <strong>${Object.keys(loadedDatasets).length} ligas</strong> cargadas. Mencioná el nombre en tu consulta.`);
+  if (!silent) addMessage('assistant', `⚽ <strong>Nueva conversación.</strong><br>Tengo <strong>${Object.keys(loadedDatasets).length} ligas</strong> cargadas. Mencioná el nombre en tu consulta.`);
   renderConvList();
 }
 function newConversation() { createNewConversation(false); closeSidebar(); }
-function setActiveConversation(id) { activeConvId=id; renderConvList(); renderChatArea(); }
-function getActiveConv() { return conversations.find(c=>c.id===activeConvId)||null; }
-function deleteConversation(id,e) {
+function setActiveConversation(id) { activeConvId = id; renderConvList(); renderChatArea(); }
+function getActiveConv() { return conversations.find(c => c.id === activeConvId) || null; }
+
+function deleteConversation(id, e) {
   e.stopPropagation();
-  conversations=conversations.filter(c=>c.id!==id); saveConvs();
-  if(activeConvId===id){if(conversations.length>0)setActiveConversation(conversations[0].id);else createNewConversation(true);}
-  else renderConvList();
+  conversations = conversations.filter(c => c.id !== id); saveConvs();
+  if (activeConvId === id) {
+    if (conversations.length > 0) setActiveConversation(conversations[0].id);
+    else createNewConversation(true);
+  } else renderConvList();
 }
+
 function renderConvList() {
-  const list=document.getElementById('convList');
-  if(!conversations.length){list.innerHTML='<div class="sidebar-empty">Aún no hay conversaciones.<br>¡Hacé tu primera consulta!</div>';return;}
-  const today=new Date();today.setHours(0,0,0,0);
-  const yesterday=new Date(today);yesterday.setDate(today.getDate()-1);
-  const week=new Date(today);week.setDate(today.getDate()-7);
-  const groups={'Hoy':[],'Ayer':[],'Últimos 7 días':[],'Anteriores':[]};
-  for(const c of conversations){const d=new Date(c.createdAt);d.setHours(0,0,0,0);if(d>=today)groups['Hoy'].push(c);else if(d>=yesterday)groups['Ayer'].push(c);else if(d>=week)groups['Últimos 7 días'].push(c);else groups['Anteriores'].push(c);}
-  let html='';
-  for(const[label,items]of Object.entries(groups)){if(!items.length)continue;html+=`<div class="sidebar-section-label">${label}</div>`;
-    for(const c of items){const act=c.id===activeConvId?'active':'';const icon=c.leagueEmoji||'💬';
-      html+=`<div class="conv-item ${act}" onclick="loadConv('${c.id}')"><span class="conv-item-icon">${icon}</span><div class="conv-item-info"><div class="conv-item-title">${escapeHtml(c.title)}</div><div class="conv-item-meta">${c.history.length} msgs</div></div><button class="conv-item-del" onclick="deleteConversation('${c.id}',event)" title="Eliminar">✕</button></div>`;
+  const list = document.getElementById('convList');
+  if (!conversations.length) { list.innerHTML = '<div class="sidebar-empty">Aún no hay conversaciones.<br>¡Hacé tu primera consulta!</div>'; return; }
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1);
+  const week = new Date(today); week.setDate(today.getDate() - 7);
+  const groups = { 'Hoy': [], 'Ayer': [], 'Últimos 7 días': [], 'Anteriores': [] };
+  for (const c of conversations) {
+    const d = new Date(c.createdAt); d.setHours(0, 0, 0, 0);
+    if (d >= today) groups['Hoy'].push(c);
+    else if (d >= yesterday) groups['Ayer'].push(c);
+    else if (d >= week) groups['Últimos 7 días'].push(c);
+    else groups['Anteriores'].push(c);
+  }
+  let html = '';
+  for (const [label, items] of Object.entries(groups)) {
+    if (!items.length) continue;
+    html += `<div class="sidebar-section-label">${label}</div>`;
+    for (const c of items) {
+      const act = c.id === activeConvId ? 'active' : '';
+      const icon = c.leagueEmoji || '💬';
+      html += `<div class="conv-item ${act}" onclick="loadConv('${c.id}')"><span class="conv-item-icon">${icon}</span><div class="conv-item-info"><div class="conv-item-title">${escapeHtml(c.title)}</div><div class="conv-item-meta">${c.history.length} msgs</div></div><button class="conv-item-del" onclick="deleteConversation('${c.id}',event)" title="Eliminar">✕</button></div>`;
     }
   }
-  list.innerHTML=html;
+  list.innerHTML = html;
 }
-function loadConv(id){setActiveConversation(id);closeSidebar();}
+function loadConv(id) { setActiveConversation(id); closeSidebar(); }
+
 function renderChatArea() {
-  const area=document.getElementById('chatArea');
-  const conv=getActiveConv();
-  if(!conv||conv.history.length===0){
-    area.innerHTML='';
-    const loaded=Object.keys(loadedDatasets).length;
-    const el=document.createElement('div');el.className='message assistant';
-    el.innerHTML=`<div class="message-bubble">⚽ <strong>¡Bienvenido a FútbolStats AI!</strong><br><br>Tengo cargadas <strong>${loaded} ligas argentinas</strong>:<br>${DATASETS_CONFIG.map(d=>{const ok=loadedDatasets[d.name];return `${d.emoji} <strong>${d.name}</strong>`+(ok?` — ${ok.length} jugadores`:' — <span style="color:var(--danger)">error</span>');}).join('<br>')}<br><br>Mencioná el nombre de la liga en tu consulta.</div>`;
-    area.appendChild(el);return;
+  const area = document.getElementById('chatArea');
+  const conv = getActiveConv();
+  if (!conv || conv.history.length === 0) {
+    area.innerHTML = '';
+    const loaded = Object.keys(loadedDatasets).length;
+    const el = document.createElement('div'); el.className = 'message assistant';
+    el.innerHTML = `<div class="message-bubble">⚽ <strong>¡Bienvenido a FútbolStats AI!</strong><br><br>Tengo cargadas <strong>${loaded} ligas argentinas</strong>:<br>${DATASETS_CONFIG.map(d => {
+      const ok = loadedDatasets[d.name];
+      return `${d.emoji} <strong>${d.name}</strong>` + (ok ? ` — ${ok.length} jugadores` : ' — <span style="color:var(--danger)">error</span>');
+    }).join('<br>')}<br><br>Mencioná el nombre de la liga en tu consulta. Podés comparar entre ligas.</div>`;
+    area.appendChild(el); return;
   }
-  area.innerHTML=conv.history.map(m=>`<div class="message ${m.role}"><div class="message-bubble">${m.html}</div></div>`).join('');
+  area.innerHTML = conv.history.map(m => `<div class="message ${m.role}"><div class="message-bubble">${m.html}</div></div>`).join('');
   scrollToBottom();
 }
 
 // ===================== LOAD DATASETS =====================
-async function loadAllDatasets(){await Promise.all(DATASETS_CONFIG.map(ds=>loadDataset(ds)));DATASETS_CONFIG.forEach(d=>{if(loadedDatasets[d.name])updateLeagueBadge(d.name,'loaded');});}
-async function loadDataset(ds){
-  updateLeagueBadge(ds.name,'loading');
-  try{const resp=await fetch(ds.file);if(!resp.ok)throw new Error(`HTTP ${resp.status}`);const buf=await resp.arrayBuffer();const wb=XLSX.read(buf,{type:'array'});const ws=wb.Sheets[wb.SheetNames[0]];let json=XLSX.utils.sheet_to_json(ws,{defval:null});
-  const fk=Object.keys(json[0]||{})[0];json=json.filter(r=>r[fk]!==fk);json=json.map(r=>{const c={};for(const[k,v]of Object.entries(r)){if(k&&k!=='null'&&!k.startsWith('__EMPTY'))c[k]=v;}return c;});
-  loadedDatasets[ds.name]=json;updateLeagueBadge(ds.name,'loaded');if(getActiveConv()?.history.length===0)renderChatArea();
-  }catch(err){console.error(`Error cargando ${ds.name}:`,err);updateLeagueBadge(ds.name,'error');}
+async function loadAllDatasets() {
+  await Promise.all(DATASETS_CONFIG.map(ds => loadDataset(ds)));
+  DATASETS_CONFIG.forEach(d => { if (loadedDatasets[d.name]) updateLeagueBadge(d.name, 'loaded'); });
 }
-function renderLeagueBadges(){document.getElementById('leaguesGrid').innerHTML=DATASETS_CONFIG.map(d=>`<div class="league-badge loading" id="badge_${slugify(d.name)}"><span class="league-dot"></span>${d.emoji} ${d.name}</div>`).join('');}
-function updateLeagueBadge(n,s){const el=document.getElementById('badge_'+slugify(n));if(el)el.className='league-badge '+s;}
-function slugify(s){return s.toLowerCase().replace(/[^a-z0-9]/g,'_');}
+
+async function loadDataset(ds) {
+  updateLeagueBadge(ds.name, 'loading');
+  try {
+    const resp = await fetch(ds.file);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const buf = await resp.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    let json = XLSX.utils.sheet_to_json(ws, { defval: null });
+    const fk = Object.keys(json[0] || {})[0];
+    json = json.filter(r => r[fk] !== fk);
+    json = json.map(r => {
+      const c = {};
+      for (const [k, v] of Object.entries(r)) {
+        if (k && k !== 'null' && !k.startsWith('__EMPTY')) c[k] = v;
+      }
+      return c;
+    });
+    loadedDatasets[ds.name] = json;
+    // Pre-compute summary
+    datasetSummaries[ds.name] = buildDatasetSummary(ds.name, json);
+    updateLeagueBadge(ds.name, 'loaded');
+    if (getActiveConv()?.history.length === 0) renderChatArea();
+  } catch (err) {
+    console.error(`Error cargando ${ds.name}:`, err);
+    updateLeagueBadge(ds.name, 'error');
+  }
+}
+
+function renderLeagueBadges() {
+  document.getElementById('leaguesGrid').innerHTML = DATASETS_CONFIG.map(d =>
+    `<div class="league-badge loading" id="badge_${slugify(d.name)}"><span class="league-dot"></span>${d.emoji} ${d.name}</div>`
+  ).join('');
+}
+function updateLeagueBadge(n, s) { const el = document.getElementById('badge_' + slugify(n)); if (el) el.className = 'league-badge ' + s; }
 
 // ===================== API KEY =====================
-function toggleApiBody(){const b=document.getElementById('apiBody');b.classList.toggle('visible');document.getElementById('apiToggleLabel').textContent=b.classList.contains('visible')?'▲ Cerrar':'▼ Configurar';}
-function saveApiKey(){const v=document.getElementById('apiKeyInput').value.trim();if(!v)return;apiKey=v;try{localStorage.setItem('fstats_gemini_key',v);}catch(e){}updateApiStatus(true);document.getElementById('apiBody').classList.remove('visible');document.getElementById('apiToggleLabel').textContent='▼ Configurar';document.getElementById('noAiNotice').classList.remove('visible');}
-function updateApiStatus(c){const d=document.getElementById('apiDot');const s=document.getElementById('apiSection');if(c){d.classList.add('active');s.classList.add('connected');}else{d.classList.remove('active');s.classList.remove('connected');}}
+function toggleApiBody() {
+  const b = document.getElementById('apiBody'); b.classList.toggle('visible');
+  document.getElementById('apiToggleLabel').textContent = b.classList.contains('visible') ? '▲ Cerrar' : '▼ Configurar';
+}
+function saveApiKey() {
+  const v = document.getElementById('apiKeyInput').value.trim(); if (!v) return;
+  apiKey = v; try { localStorage.setItem('fstats_gemini_key', v); } catch (e) {}
+  updateApiStatus(true);
+  document.getElementById('apiBody').classList.remove('visible');
+  document.getElementById('apiToggleLabel').textContent = '▼ Configurar';
+  document.getElementById('noAiNotice').classList.remove('visible');
+}
+function updateApiStatus(c) {
+  const d = document.getElementById('apiDot'); const s = document.getElementById('apiSection');
+  if (c) { d.classList.add('active'); s.classList.add('connected'); }
+  else { d.classList.remove('active'); s.classList.remove('connected'); }
+}
 
 // ===================== SIDEBAR MOBILE =====================
-function toggleSidebar(){document.getElementById('sidebar').classList.toggle('open');document.getElementById('sidebarOverlay').classList.toggle('open');}
-function closeSidebar(){document.getElementById('sidebar').classList.remove('open');document.getElementById('sidebarOverlay').classList.remove('open');}
-
-// ===================== DATASET DETECTION =====================
-function detectDataset(q){const l=q.toLowerCase();for(const ds of DATASETS_CONFIG)for(const kw of ds.keywords)if(l.includes(kw))return ds.name;return null;}
+function toggleSidebar() { document.getElementById('sidebar').classList.toggle('open'); document.getElementById('sidebarOverlay').classList.toggle('open'); }
+function closeSidebar() { document.getElementById('sidebar').classList.remove('open'); document.getElementById('sidebarOverlay').classList.remove('open'); }
 
 // ===================== SPEECH RECOGNITION =====================
-function initSpeechRecognition(){const SR=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SR){document.getElementById('btnMic').style.display='none';return;}recognition=new SR();recognition.lang='es-ES';recognition.continuous=false;recognition.interimResults=false;recognition.onresult=e=>{const t=e.results[0][0].transcript;const inp=document.getElementById('queryInput');inp.value=t;autoResize(inp);document.getElementById('btnSend').disabled=false;stopListening();};recognition.onerror=()=>stopListening();recognition.onend=()=>stopListening();}
-function toggleMic(){if(isListening){recognition.stop();stopListening();}else startListening();}
-function startListening(){if(!recognition)return;isListening=true;document.getElementById('btnMic').classList.add('listening');document.getElementById('btnMic').title='Detener';recognition.start();}
-function stopListening(){isListening=false;document.getElementById('btnMic').classList.remove('listening');document.getElementById('btnMic').title='Hablar';}
-
-// ===================== CHAT =====================
-function addMessage(role,html){
-  const conv=getActiveConv();
-  if(conv){conv.history.push({role,html});if(role==='user'&&conv.history.filter(m=>m.role==='user').length===1)conv.title=html.replace(/<[^>]+>/g,'').substring(0,50);saveConvs();renderConvList();}
-  const area=document.getElementById('chatArea');const msg=document.createElement('div');msg.className=`message ${role}`;msg.innerHTML=`<div class="message-bubble">${html}</div>`;area.appendChild(msg);scrollToBottom();
+function initSpeechRecognition() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { document.getElementById('btnMic').style.display = 'none'; return; }
+  recognition = new SR(); recognition.lang = 'es-ES'; recognition.continuous = false; recognition.interimResults = false;
+  recognition.onresult = e => {
+    const t = e.results[0][0].transcript;
+    const inp = document.getElementById('queryInput'); inp.value = t; autoResize(inp);
+    document.getElementById('btnSend').disabled = false; stopListening();
+  };
+  recognition.onerror = () => stopListening();
+  recognition.onend = () => stopListening();
 }
-function showTyping(){const area=document.getElementById('chatArea');const ind=document.createElement('div');ind.className='typing-indicator';ind.id='typingIndicator';ind.innerHTML='<span></span><span></span><span></span>';area.appendChild(ind);scrollToBottom();}
-function hideTyping(){const el=document.getElementById('typingIndicator');if(el)el.remove();}
-function scrollToBottom(){setTimeout(()=>window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'}),100);}
-function autoResize(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,120)+'px';}
-function quickQuery(t){const inp=document.getElementById('queryInput');inp.value=t;autoResize(inp);document.getElementById('btnSend').disabled=false;handleSend();}
+function toggleMic() { if (isListening) { recognition.stop(); stopListening(); } else startListening(); }
+function startListening() { if (!recognition) return; isListening = true; document.getElementById('btnMic').classList.add('listening'); document.getElementById('btnMic').title = 'Detener'; recognition.start(); }
+function stopListening() { isListening = false; document.getElementById('btnMic').classList.remove('listening'); document.getElementById('btnMic').title = 'Hablar'; }
 
-// ===================== SEND (AI-FIRST, OFFLINE ONLY FOR STRUCTURAL) =====================
-async function handleSend(){
-  const inp=document.getElementById('queryInput');const query=inp.value.trim();if(!query||isProcessing)return;
-  if(!getActiveConv())createNewConversation(true);
-  isProcessing=true;inp.value='';inp.style.height='auto';document.getElementById('btnSend').disabled=true;
-  addMessage('user',escapeHtml(query));showTyping();
-  try{
-    const ln=detectDataset(query);
-    const ck=cacheKey(query,ln);
-    if(responseCache[ck]){hideTyping();addMessage('assistant',responseCache[ck]);isProcessing=false;return;}
-
-    let response;
-    if(!ln){
-      // No league detected → Gemini for general/conceptual, or offline fallback
-      if(apiKey){
-        response=await queryGeminiGeneral(query);
-      } else {
-        response=buildNoLeagueOffline();
-      }
-    } else {
-      const data=loadedDatasets[ln];
-      if(!data){response=`❌ Los datos de <strong>${ln}</strong> no pudieron cargarse.`;}
-      else {
-        const conv=getActiveConv();if(conv&&!conv.leagueEmoji){conv.leagueEmoji=DATASETS_CONFIG.find(d=>d.name===ln)?.emoji||'💬';saveConvs();}
-        const simple=isSimpleOfflineQuery(query);
-
-        if(simple){
-          // Pure structural query → offline handles it perfectly
-          const offlineResult=queryOffline(query,ln,data);
-          response=offlineResult.html;
-        } else if(apiKey){
-          // Everything else → Gemini with pre-filtered data
-          response=await queryWithGemini(query,ln,data);
-        } else {
-          // No API key → offline as best-effort fallback
-          const offlineResult=queryOffline(query,ln,data);
-          response=offlineResult.html;
-        }
-      }
+// ===================== CHAT UI =====================
+function addMessage(role, html) {
+  const conv = getActiveConv();
+  if (conv) {
+    conv.history.push({ role, html });
+    if (role === 'user' && conv.history.filter(m => m.role === 'user').length === 1) {
+      conv.title = html.replace(/<[^>]+>/g, '').substring(0, 50);
     }
-    responseCache[ck]=response;
-    hideTyping();addMessage('assistant',response);
-  }catch(err){hideTyping();addMessage('assistant',`❌ Error: ${escapeHtml(err.message)}`);}
-  isProcessing=false;
-}
-
-// ===================== NO LEAGUE =====================
-function buildNoLeagueOffline(){return `🤔 No detecté a qué liga querés consultar:<br><br>`+DATASETS_CONFIG.map(d=>{const ds=loadedDatasets[d.name];return `${d.emoji} <strong>${d.name}</strong>`+(ds?` (${ds.length} jug.)`:``);}).join('<br>')+`<br><br>Mencioná el nombre de la liga en tu consulta.`;}
-
-// ===================== UTILITIES =====================
-function analyzeColumns(data){
-  const columns=Object.keys(data[0]||{});
-  const numCols=columns.filter(col=>data.slice(0,20).some(r=>typeof r[col]==='number'||(!isNaN(parseFloat(r[col]))&&r[col]!==null&&r[col]!=='')));
-  const nameCol=columns.find(c=>/jugador|player|nombre|name/i.test(c))||columns[0];
-  const equipoCol=columns.find(c=>/equipo|team|club/i.test(c));
-  const skipCols=new Set([nameCol,equipoCol].filter(Boolean).map(c=>c.toLowerCase()));
-  const candidateCols=numCols.filter(c=>!skipCols.has(c.toLowerCase()));
-  return {columns,numCols,nameCol,equipoCol,candidateCols};
-}
-function stripHtml(html){const d=document.createElement('div');d.innerHTML=html;return (d.textContent||d.innerText||'').substring(0,200);}
-// Offline SOLO maneja consultas puramente estructurales/mecánicas.
-// Cualquier lenguaje subjetivo/analítico va a Gemini.
-function isSimpleOfflineQuery(q){
-  const t=q.trim();
-  // Structural info queries
-  if(/^(cuántos|cuantos|cantidad|total de jugadores|columnas|campos|qué datos|que datos|variables|resumen|summary|overview|qué ligas|que ligas)/i.test(t)) return true;
-  // Exact player/team lookup
-  if(/^(datos de|info de|estadísticas de|stats de|decime sobre|buscar a|buscar)\s+/i.test(t)) return true;
-  if(/^(jugadores de|plantel de|equipo)\s+/i.test(t)) return true;
-  // Simple "promedio de X"
-  if(/^promedio\s+(de|del)\s+/i.test(t)) return true;
-  // "top N por/de/en X" WITHOUT subjective language after
-  if(/^top\s+\d+\s+(por|de|en)\s+/i.test(t) && !/que sea|tipo|perfil|estilo|mejor|peor|como|parecido|similar/i.test(t)) return true;
-  return false;
-}
-function buildMultiLeagueSummary(){
-  const ligas=[];
-  for(const ds of DATASETS_CONFIG){
-    const d=loadedDatasets[ds.name];if(!d)continue;
-    const a=analyzeColumns(d);
-    ligas.push({n:ds.name.replace(/ 2025$/,''),j:d.length,c:a.candidateCols.slice(0,8)});
+    saveConvs(); renderConvList();
   }
-  return JSON.stringify({ligas});
+  const area = document.getElementById('chatArea');
+  const msg = document.createElement('div'); msg.className = `message ${role}`;
+  msg.innerHTML = `<div class="message-bubble">${html}</div>`;
+  area.appendChild(msg); scrollToBottom();
 }
-
-// ===================== RESPONSE CACHE =====================
-const responseCache={};
-function cacheKey(q,ln){return (q.toLowerCase().trim()+'||'+(ln||'')).substring(0,120);}
+function showTyping() {
+  const area = document.getElementById('chatArea');
+  const ind = document.createElement('div'); ind.className = 'typing-indicator'; ind.id = 'typingIndicator';
+  ind.innerHTML = '<span></span><span></span><span></span>'; area.appendChild(ind); scrollToBottom();
+}
+function hideTyping() { const el = document.getElementById('typingIndicator'); if (el) el.remove(); }
+function scrollToBottom() { setTimeout(() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }), 100); }
+function autoResize(el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 120) + 'px'; }
+function quickQuery(t) { const inp = document.getElementById('queryInput'); inp.value = t; autoResize(inp); document.getElementById('btnSend').disabled = false; handleSend(); }
 
 // ===================== COLUMN DETECTION ENGINE =====================
-function detectTargetColumn(q, candidateCols){
-  if(!candidateCols.length) return {col:null, matched:false};
-  const synonyms={'para':'hacia','porcentaje':'%','percent':'%','precision':'precisin','porciento':'%','promedio':'media','ataque':'atacante','defensa':'defensiv','amarilla':'amarill','roja':'roj','gol':'goles','asistencia':'asist','pase':'pases','tiro':'remat','cabeza':'cabeza','duelo':'duelos','falta':'faltas','carrera':'carreras','centro':'centros','regate':'regates','corner':'crner','penal':'penalti','intercepcion':'interceptacion','entrada':'entradas','corto':'cortos','largo':'largos','lateral':'laterales','profundidad':'profundidad','progresivo':'progresivos','adelante':'adelante','atras':'atrs','libre':'libres','desmarque':'desmarques','clave':'claves','ultimo':'ltimo','tercio':'tercio','area':'rea','delante':'adelante'};
-  const qWords=q.replace(/[,?¿!¡]/g,' ').split(/\s+/).filter(w=>w.length>1);
-  const expandedWords=new Set(qWords);
-  for(const w of qWords){if(synonyms[w])expandedWords.add(synonyms[w]);}
-  const wantsPercent=/porcentaje|porciento|precisión|precision|%|eficacia|efectividad|ratio|tasa/i.test(q);
-  const wants90=/\/90|por 90|sobre 90|cada 90|en 90/i.test(q);
-  let best=null;let bestScore=-1;
-  for(const col of candidateCols){
-    const cl=col.toLowerCase();
-    const colWords=cl.replace(/[\/\(\),]/g,' ').replace(/%/g,' % ').split(/\s+/).filter(w=>w.length>1);
-    let wordMatches=0;
-    for(const cw of colWords){for(const qw of expandedWords){if(cw.includes(qw)||qw.includes(cw)){wordMatches++;break;}}}
-    if(wordMatches===0) continue;
-    let score=wordMatches/Math.max(colWords.length,1);
-    if(wantsPercent && cl.includes('%')) score+=2;
-    if(wantsPercent && !cl.includes('%')) score-=0.5;
-    if(wants90 && cl.includes('/90')) score+=1.5;
-    if(!wantsPercent && cl.includes('%') && candidateCols.some(c=>!c.toLowerCase().includes('%')&&colWords.some(cw=>c.toLowerCase().includes(cw)))) score-=0.3;
-    score+=wordMatches*0.3;
-    if(score>bestScore){bestScore=score;best=col;}
+function detectTargetColumn(q, candidateCols) {
+  if (!candidateCols.length) return { col: null, matched: false };
+  const synonyms = {
+    'porcentaje':'%','percent':'%','porciento':'%','promedio':'media',
+    'gol':'goles','asistencia':'asist','pase':'pases','tiro':'remat',
+    'cabeza':'cabeza','duelo':'duelos','falta':'faltas','centro':'centros',
+    'regate':'regates','penal':'penalti','intercepcion':'interceptacion',
+    'entrada':'entradas','corto':'cortos','largo':'largos','lateral':'laterales',
+    'progresivo':'progresivos','libre':'libres','clave':'claves','tercio':'tercio',
+    'amarilla':'amarill','roja':'roj','minuto':'minut','partido':'partid',
+    'disparo':'tiro','remate':'tiro','xg':'xg','xa':'xa','expected':'esperado',
+    'aéreo':'aereo','aereo':'aereo',
+    'defensivo':'defensiv','defensiva':'defensiv','defensa':'defensiv',
+    'ofensivo':'ataque','ofensiva':'ataque','ataque':'ataque',
+    'posesion':'posesi','recuperacion':'posesi','recuperar':'posesi',
+    'aceleracion':'aceler','carrera':'carrer','progresion':'progres',
+    'profundidad':'profundidad','desmarcacion':'desmarque','desmarque':'desmarque'
+  };
+  const qNorm = removeAccents(q.toLowerCase());
+  const qWords = qNorm.replace(/[,?¿!¡\/()]/g, ' ').split(/\s+/).filter(w => w.length > 1);
+  const expandedWords = new Set(qWords);
+  for (const w of qWords) { if (synonyms[w]) expandedWords.add(synonyms[w]); }
+
+  const wantsPercent = /porcentaje|porciento|precision|%|eficacia|efectividad|ratio|tasa/i.test(qNorm);
+  const wants90 = /\/90|por 90|sobre 90|cada 90|en 90/i.test(qNorm);
+
+  let best = null; let bestScore = -1;
+  for (const col of candidateCols) {
+    const cl = removeAccents(col.toLowerCase());
+    const colWords = cl.replace(/[\/\(\),]/g, ' ').replace(/%/g, ' % ').split(/\s+/).filter(w => w.length > 1);
+    let wordMatches = 0;
+    for (const cw of colWords) {
+      for (const qw of expandedWords) {
+        if (cw.includes(qw) || qw.includes(cw)) { wordMatches++; break; }
+      }
+    }
+    if (wordMatches === 0) continue;
+    let score = wordMatches / Math.max(colWords.length, 1);
+    if (wantsPercent && cl.includes('%')) score += 2;
+    if (wantsPercent && !cl.includes('%')) score -= 0.5;
+    if (wants90 && cl.includes('/90')) score += 1.5;
+    if (!wantsPercent && cl.includes('%') && candidateCols.some(c => !removeAccents(c.toLowerCase()).includes('%') && colWords.some(cw => removeAccents(c.toLowerCase()).includes(cw)))) score -= 0.3;
+    score += wordMatches * 0.3;
+    if (score > bestScore) { bestScore = score; best = col; }
   }
-  if(best && bestScore>0.3) return {col:best, matched:true};
-  return {col:candidateCols[0], matched:false};
+  if (best && bestScore > 0.3) return { col: best, matched: true };
+  return { col: candidateCols[0], matched: false };
+}
+
+// Detect multiple relevant columns for a profile/tactical query
+function detectProfileColumns(query, candidateCols, allColumns) {
+  // Use allColumns (all columns including non-numeric like position) when available
+  const searchCols = allColumns || candidateCols;
+
+  const profiles = {
+    '9.*tanque|centrodelantero|goleador|killer|ariete|delantero centro|referencia.*area': {
+      must: ['gol','tiro','cabeza','aereo','duelo','xg','remate','penal','area','remat','portera','ataque'],
+      extra: ['asist','toques.*area','accion.*ataque']
+    },
+    'creativo|enganche|mediapunta|10|armador|organizador': {
+      must: ['asist','clave','xa','pase','progres','chance','key','through','oport','desmarque','profundidad','tercio'],
+      extra: ['regate','pase.*adelante','jugada']
+    },
+    'lateral.*izquierd|lateral izquierdo|carrilero izquierd': {
+      must: ['centro','banda.*izquierda','pase','asist','progres','carrera','duelo','regate','defensiv','entrada','intercep','aceler','centros.*tercio'],
+      extra: ['duelo.*defensiv','duelo.*atac','pase.*lateral','pase.*adelante','falta']
+    },
+    'lateral.*derech|lateral derecho|carrilero derech': {
+      must: ['centro','banda.*derecha','pase','asist','progres','carrera','duelo','regate','defensiv','entrada','intercep','aceler','centros.*tercio'],
+      extra: ['duelo.*defensiv','duelo.*atac','pase.*lateral','pase.*adelante','falta']
+    },
+    'lateral.*ofensiv|carrilero|wingback': {
+      must: ['centro','pase','asist','progres','carrera','duelo','regate','defensiv','entrada','intercep','aceler','banda','centros.*tercio','ataque.*profundidad'],
+      extra: ['duelo.*defensiv','duelo.*atac','pase.*lateral','pase.*adelante','falta']
+    },
+    'central|defensor|zaguero|stopper|marcador central': {
+      must: ['duelo','intercep','entrada','aereo','cabeza','despe','bloqueo','falta','defensiv','tiro.*intercep','posesi.*entrada','posesi.*intercep','tarjeta'],
+      extra: ['pase.*largo','altura','peso','duelo.*defensiv']
+    },
+    'volante.*central|contencion|5|pivote|mediocentro|volante defensiv': {
+      must: ['pase','intercep','duelo','recuper','progres','entrada','falta','corte','defensiv','pase.*corto','pase.*largo','posesi'],
+      extra: ['tarjeta','duelo.*aereo','accion.*defensiv']
+    },
+    'volante.*ofensiv|interior|8|box.*box|volante mixto': {
+      must: ['pase','gol','asist','duelo','progres','clave','tercio','regate','carrera','aceler'],
+      extra: ['defensiv','entrada','intercep','xg','xa']
+    },
+    'extremo|wing|puntero|encarador|winger': {
+      must: ['regate','centro','gol','asist','tiro','progres','1v1','dribbl','velocidad','aceler','carrera','atac'],
+      extra: ['xg','xa','toques.*area','duelo.*atac']
+    },
+    'arquero|portero|guardameta|1|goalkeeper': {
+      must: ['atajad','salv','gol.*recib','penal','pase','saqu','aere'],
+      extra: []
+    }
+  };
+
+  const qNorm = removeAccents(query.toLowerCase());
+  let matchedHints = [];
+
+  for (const [pattern, { must, extra }] of Object.entries(profiles)) {
+    if (new RegExp(pattern, 'i').test(qNorm)) {
+      matchedHints = [...must, ...extra];
+      break;
+    }
+  }
+
+  // If no specific profile matched, use a broad set for general position queries
+  if (matchedHints.length === 0) {
+    if (/lateral|defens|volante|delanter|extremo|mediocampo|mediapunta|arquero|portero/i.test(qNorm)) {
+      matchedHints = ['gol','asist','duelo','defensiv','entrada','intercep','centro','pase','regate','aereo','progres','carrera','aceler','xg','xa','remate','tiro','falta','tarjeta','cabeza','toques','clave','tercio','profundidad'];
+    }
+  }
+
+  if (matchedHints.length === 0) return null;
+
+  // Match hints against actual column names (search both numeric and all columns)
+  const matched = [];
+  for (const hint of matchedHints) {
+    const re = new RegExp(hint, 'i');
+    for (const col of searchCols) {
+      if (re.test(removeAccents(col)) && !matched.includes(col)) {
+        matched.push(col);
+      }
+    }
+  }
+  return matched.length > 0 ? matched : null;
 }
 
 // ===================== FILTER EXTRACTION ENGINE =====================
-function extractFilters(q, candidateCols){
-  const filters=[];
-  // Patterns: "con más de 400 minutos jugados", "al menos 10 partidos", "mayores de 25 años"
-  const simplePatterns=[
-    {re:/(?:con\s+)?(?:más|mas)\s+de\s+(\d+[\d.,]*)\s+([a-záéíóúñü][a-záéíóúñü\s]{1,30})/gi, op:'>'},
-    {re:/(?:con\s+)?(?:al\s+menos|mínimo|minimo)\s+(\d+[\d.,]*)\s+([a-záéíóúñü][a-záéíóúñü\s]{1,30})/gi, op:'>='},
-    {re:/(?:con\s+)?(?:menos|menor)\s+de\s+(\d+[\d.,]*)\s+([a-záéíóúñü][a-záéíóúñü\s]{1,30})/gi, op:'<'},
-    {re:/(?:mayor(?:es)?)\s+de\s+(\d+[\d.,]*)\s+(años?|edad)/gi, op:'>'},
-    {re:/(?:menor(?:es)?)\s+de\s+(\d+[\d.,]*)\s+(años?|edad)/gi, op:'<'},
+function extractFilters(q, candidateCols) {
+  const filters = [];
+  const simplePatterns = [
+    { re: /(?:con\s+)?(?:más|mas)\s+de\s+(\d+[\d.,]*)\s+([a-záéíóúñü][a-záéíóúñü\s]{1,30})/gi, op: '>' },
+    { re: /(?:con\s+)?(?:al\s+menos|mínimo|minimo)\s+(\d+[\d.,]*)\s+([a-záéíóúñü][a-záéíóúñü\s]{1,30})/gi, op: '>=' },
+    { re: /(?:con\s+)?(?:menos|menor)\s+de\s+(\d+[\d.,]*)\s+([a-záéíóúñü][a-záéíóúñü\s]{1,30})/gi, op: '<' },
+    { re: /(?:mayor(?:es)?)\s+de\s+(\d+[\d.,]*)\s+(años?|edad)/gi, op: '>' },
+    { re: /(?:menor(?:es)?)\s+de\s+(\d+[\d.,]*)\s+(años?|edad)/gi, op: '<' },
   ];
-  for(const{re,op}of simplePatterns){
-    let m;re.lastIndex=0;
-    while((m=re.exec(q))!==null){
-      const val=parseFloat(m[1].replace(',','.'));
-      // Clean the hint: remove trailing noise words and league references
-      let hint=m[2].trim().toLowerCase()
-        .replace(/\s+(de la|en la|del|de el|que|y)\s*.*$/,'')
-        .replace(/\s+$/,'');
-      if(isNaN(val)||!hint||hint.length<3) continue;
-      const colMatch=detectTargetColumn(hint, candidateCols);
-      if(colMatch.matched) filters.push({col:colMatch.col, op, val});
+  for (const { re, op } of simplePatterns) {
+    let m; re.lastIndex = 0;
+    while ((m = re.exec(q)) !== null) {
+      const val = parseFloat(m[1].replace(',', '.'));
+      let hint = m[2].trim().toLowerCase()
+        .replace(/\s+(de la|en la|del|de el|que|y)\s*.*$/, '')
+        .replace(/\s+$/, '');
+      if (isNaN(val) || !hint || hint.length < 3) continue;
+      const colMatch = detectTargetColumn(hint, candidateCols);
+      if (colMatch.matched) filters.push({ col: colMatch.col, op, val });
     }
   }
   return filters;
 }
-function applyFilters(data, filters){
-  if(!filters.length) return data;
-  return data.filter(r=>{
-    for(const f of filters){
-      const v=parseFloat(r[f.col]);
-      if(isNaN(v)) return false;
-      if(f.op==='>'&&!(v>f.val)) return false;
-      if(f.op==='>='&&!(v>=f.val)) return false;
-      if(f.op==='<'&&!(v<f.val)) return false;
-      if(f.op==='<='&&!(v<=f.val)) return false;
+
+function applyFilters(data, filters) {
+  if (!filters.length) return data;
+  return data.filter(r => {
+    for (const f of filters) {
+      const v = parseFloat(r[f.col]);
+      if (isNaN(v)) return false;
+      if (f.op === '>' && !(v > f.val)) return false;
+      if (f.op === '>=' && !(v >= f.val)) return false;
+      if (f.op === '<' && !(v < f.val)) return false;
+      if (f.op === '<=' && !(v <= f.val)) return false;
     }
     return true;
   });
 }
-function describeFilters(filters){
-  if(!filters.length) return '';
-  return '<br><em>Filtros: '+filters.map(f=>`${f.col} ${f.op} ${f.val}`).join(', ')+'</em>';
+
+function describeFilters(filters) {
+  if (!filters.length) return '';
+  return '<br><em>Filtros: ' + filters.map(f => `${f.col} ${f.op} ${f.val}`).join(', ') + '</em>';
 }
 
-// ===================== OFFLINE QUERY (retorna {confident, html}) =====================
-function queryOffline(query,leagueName,data){
-  const q=query.toLowerCase();
-  const {columns,numCols,nameCol,equipoCol,candidateCols}=analyzeColumns(data);
+// ===================== QUERY CLASSIFICATION =====================
+function isSimpleOfflineQuery(q) {
+  const t = q.trim();
+  // Never treat position/profile queries as simple offline — they need Gemini
+  if (/lateral|defens|central|volante|extremo|delanter|enganche|mediapunta|arquero|portero|carrilero|stopper|puntero|pivote|contencion|wing|scout|perfil|estilo/i.test(t)) return false;
+  if (/^(cuántos|cuantos|cantidad|total de jugadores|columnas|campos|qué datos|que datos|variables|resumen|summary|overview|qué ligas|que ligas)/i.test(t)) return true;
+  if (/^(datos de|info de|estadísticas de|stats de|decime sobre|buscar a|buscar)\s+/i.test(t)) return true;
+  if (/^(jugadores de|plantel de|equipo)\s+/i.test(t)) return true;
+  if (/^promedio\s+(de|del)\s+/i.test(t)) return true;
+  if (/^top\s+\d+\s+(por|de|en)\s+/i.test(t) && !/que sea|tipo|perfil|estilo|mejor|peor|como|parecido|similar/i.test(t)) return true;
+  return false;
+}
 
-  // ========= DETECCIÓN DE COLUMNA INTELIGENTE =========
+function classifyQuery(query) {
+  const q = removeAccents(query.toLowerCase());
+  // Profile/tactical → needs Gemini with broad data
+  if (/perfil|tipo|estilo|caracter[ií]stica|parecido|similar|scout|busco un|necesito un|9 tanque|enganche|lateral ofensiv|lateral izquierd|lateral derech|volante creativ|extremo|mediapunta|stopper|carrilero|defensor central|marcador central|delantero centro|centrodelantero|volante defensiv|volante ofensiv|wing.?back|puntero|referencia|ariete|pivote|contencion|interior|box.to.box|organizador|armador/i.test(q))
+    return 'profile';
+  // Comparison
+  if (/compar[aáeé]|vs\.?|versus|diferencia entre|mejor entre/i.test(q))
+    return 'compare';
+  // Multi-league
+  if (detectDatasets(query).length > 1 && /compar|entre|vs|ambas|todas|las \d/i.test(q))
+    return 'multi-league';
+  // Analysis/opinion
+  if (/anali[zs]|por qu[eé]|explica|opini[oó]n|conclusi[oó]n|tendencia|patr[oó]n|insight|destac/i.test(q))
+    return 'analysis';
+  return 'standard';
+}
+
+// ===================== OFFLINE QUERY ENGINE =====================
+function queryOffline(query, leagueName, data) {
+  const q = query.toLowerCase();
+  const { columns, numCols, nameCol, equipoCol, candidateCols } = analyzeColumns(data);
   const colResult = detectTargetColumn(q, candidateCols);
   const targetCol = colResult.col;
   const keywordMatched = colResult.matched;
 
-  // Extraer N para "top N" — ignorar años (4 dígitos)
-  function extractCount(){
-    // "Quién fue el jugador..." / "cuál fue el..." → singular = 1
-    if(/^(quién|quien|cuál|cual) (fue|es|era)\s+(el|la)\b/i.test(q)) return 1;
-    const topMatch=q.match(/top\s*(\d{1,3})\b/i);
-    if(topMatch) return parseInt(topMatch[1]);
-    const nums=[...q.matchAll(/\b(\d{1,3})\b/g)].map(m=>parseInt(m[1])).filter(n=>n>=1&&n<=200);
-    return nums[0]||10;
+  function extractCount() {
+    if (/^(quién|quien|cuál|cual) (fue|es|era)\s+(el|la)\b/i.test(q)) return 1;
+    const topMatch = q.match(/top\s*(\d{1,3})\b/i);
+    if (topMatch) return parseInt(topMatch[1]);
+    const nums = [...q.matchAll(/\b(\d{1,3})\b/g)].map(m => parseInt(m[1])).filter(n => n >= 1 && n <= 200);
+    return nums[0] || 10;
   }
 
-  // ========= EXTRAER FILTROS (ej: "con más de 400 minutos jugados") =========
-  const filters=extractFilters(q, candidateCols);
-  const filteredData=applyFilters(data, filters);
-  const filterNote=describeFilters(filters);
+  const filters = extractFilters(q, candidateCols);
+  const filteredData = applyFilters(data, filters);
+  const filterNote = describeFilters(filters);
 
-  // TOP / RANKING / QUIÉN
-  if(/top|más|mayor|mejor|máximo|ranking|max|líder|lider|quién fue|quien fue|cuál fue|cual fue/i.test(q)){
-    const n=extractCount();
-    if(targetCol && keywordMatched){
-      const sorted=[...filteredData].sort((a,b)=>(parseFloat(b[targetCol])||0)-(parseFloat(a[targetCol])||0));
-      const showEquipo=equipoCol && targetCol!==equipoCol;
-      let html=`<strong>🏆 Top ${n} por ${targetCol} — ${leagueName}</strong>${filterNote}<br><table><thead><tr><th>#</th><th>${nameCol}</th>${showEquipo?`<th>Equipo</th>`:''}<th>${targetCol}</th></tr></thead><tbody>`;
-      sorted.slice(0,n).forEach((r,i)=>{html+=`<tr><td>${i+1}</td><td>${r[nameCol]??'—'}</td>${showEquipo?`<td>${r[equipoCol]??'—'}</td>`:''}<td>${r[targetCol]??'—'}</td></tr>`;});
-      return {confident:true, html:html+'</tbody></table>'};
+  // TOP / RANKING
+  if (/top|más|mayor|mejor|máximo|ranking|max|líder|lider|quién fue|quien fue|cuál fue|cual fue/i.test(q)) {
+    const n = extractCount();
+    if (targetCol && keywordMatched) {
+      const sorted = [...filteredData].sort((a, b) => (parseFloat(b[targetCol]) || 0) - (parseFloat(a[targetCol]) || 0));
+      const showEquipo = equipoCol && targetCol !== equipoCol;
+      let html = `<strong>🏆 Top ${n} por ${targetCol} — ${leagueName}</strong>${filterNote}<br><table><thead><tr><th>#</th><th>${nameCol}</th>${showEquipo ? `<th>Equipo</th>` : ''}<th>${targetCol}</th></tr></thead><tbody>`;
+      sorted.slice(0, n).forEach((r, i) => {
+        html += `<tr><td>${i + 1}</td><td>${r[nameCol] ?? '—'}</td>${showEquipo ? `<td>${r[equipoCol] ?? '—'}</td>` : ''}<td>${r[targetCol] ?? '—'}</td></tr>`;
+      });
+      return { confident: true, html: html + '</tbody></table>' };
     }
   }
+
   // PROMEDIO
-  if(/promedio|media|average|avg/i.test(q)&&targetCol&&keywordMatched){
-    const vals=filteredData.map(r=>parseFloat(r[targetCol])).filter(v=>!isNaN(v));
-    if(vals.length) return {confident:true, html:`📊 Promedio de <strong>${targetCol}</strong> en <strong>${leagueName}</strong>: <strong>${(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(2)}</strong> (${vals.length} jugadores).${filterNote}`};
+  if (/promedio|media|average|avg/i.test(q) && targetCol && keywordMatched) {
+    const vals = filteredData.map(r => parseFloat(r[targetCol])).filter(v => !isNaN(v));
+    if (vals.length) return { confident: true, html: `📊 Promedio de <strong>${targetCol}</strong> en <strong>${leagueName}</strong>: <strong>${(vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(2)}</strong> (${vals.length} jugadores).${filterNote}` };
   }
+
   // MÍNIMO
-  if(/mínimo|minimo|menor|peor|bajo/i.test(q)&&targetCol&&keywordMatched){
-    const n=extractCount();
-    const sorted=[...filteredData].sort((a,b)=>(parseFloat(a[targetCol])||0)-(parseFloat(b[targetCol])||0)).filter(r=>parseFloat(r[targetCol])>0);
-    const showEquipo=equipoCol && targetCol!==equipoCol;
-    let html=`<strong>📉 Menor ${n} por ${targetCol} — ${leagueName}</strong>${filterNote}<br><table><thead><tr><th>#</th><th>${nameCol}</th>${showEquipo?`<th>Equipo</th>`:''}<th>${targetCol}</th></tr></thead><tbody>`;
-    sorted.slice(0,n).forEach((r,i)=>{html+=`<tr><td>${i+1}</td><td>${r[nameCol]??'—'}</td>${showEquipo?`<td>${r[equipoCol]??'—'}</td>`:''}<td>${r[targetCol]??'—'}</td></tr>`;});
-    return {confident:true, html:html+'</tbody></table>'};
+  if (/mínimo|minimo|menor|peor|bajo/i.test(q) && targetCol && keywordMatched) {
+    const n = extractCount();
+    const sorted = [...filteredData].sort((a, b) => (parseFloat(a[targetCol]) || 0) - (parseFloat(b[targetCol]) || 0)).filter(r => parseFloat(r[targetCol]) > 0);
+    const showEquipo = equipoCol && targetCol !== equipoCol;
+    let html = `<strong>📉 Menor ${n} por ${targetCol} — ${leagueName}</strong>${filterNote}<br><table><thead><tr><th>#</th><th>${nameCol}</th>${showEquipo ? `<th>Equipo</th>` : ''}<th>${targetCol}</th></tr></thead><tbody>`;
+    sorted.slice(0, n).forEach((r, i) => {
+      html += `<tr><td>${i + 1}</td><td>${r[nameCol] ?? '—'}</td>${showEquipo ? `<td>${r[equipoCol] ?? '—'}</td>` : ''}<td>${r[targetCol] ?? '—'}</td></tr>`;
+    });
+    return { confident: true, html: html + '</tbody></table>' };
   }
-  // JUGADOR ESPECÍFICO
-  const jugadorMatch=q.match(/(?:datos de|info de|estadísticas de|stats de|decime sobre|buscar a|buscar)\s+(.+)/i);
-  if(jugadorMatch){
-    const nombre=jugadorMatch[1].trim().toLowerCase();
-    const found=data.filter(r=>(r[nameCol]||'').toLowerCase().includes(nombre));
-    if(found.length>0){
-      let html=`<strong>🔍 "${jugadorMatch[1]}" — ${leagueName}</strong><br>`;
-      found.slice(0,5).forEach(r=>{html+=`<table><tbody>`;for(const[k,v]of Object.entries(r)){if(v!==null&&v!=='')html+=`<tr><td><strong>${k}</strong></td><td>${v}</td></tr>`;}html+=`</tbody></table><br>`;});
-      return {confident:true, html};
+
+  // PLAYER SEARCH
+  const jugadorMatch = q.match(/(?:datos de|info de|estadísticas de|stats de|decime sobre|buscar a|buscar)\s+(.+)/i);
+  if (jugadorMatch) {
+    const nombre = jugadorMatch[1].trim().toLowerCase().replace(/de la .*|en la .*|de el .*/i, '').trim();
+    const found = data.filter(r => (r[nameCol] || '').toLowerCase().includes(nombre));
+    if (found.length > 0) {
+      let html = `<strong>🔍 "${jugadorMatch[1]}" — ${leagueName}</strong><br>`;
+      found.slice(0, 5).forEach(r => {
+        html += `<table><tbody>`;
+        for (const [k, v] of Object.entries(r)) { if (v !== null && v !== '') html += `<tr><td><strong>${k}</strong></td><td>${v}</td></tr>`; }
+        html += `</tbody></table><br>`;
+      });
+      return { confident: true, html };
     }
   }
-  // POR EQUIPO
-  if(equipoCol&&/equipo|club|plantel|jugadores de/i.test(q)){
-    const equipoWords=q.replace(/.*(?:equipo|club|plantel|jugadores de)\s*/i,'').trim().replace(/de la .*/,'').trim();
-    if(equipoWords.length>2){
-      const found=data.filter(r=>(r[equipoCol]||'').toLowerCase().includes(equipoWords));
-      if(found.length>0){
-        let html=`<strong>👥 ${found.length} jugadores — "${equipoWords}" — ${leagueName}</strong><br><table><thead><tr><th>${nameCol}</th>${numCols.slice(0,3).map(c=>`<th>${c}</th>`).join('')}</tr></thead><tbody>`;
-        found.forEach(r=>{html+=`<tr><td>${r[nameCol]??'—'}</td>${numCols.slice(0,3).map(c=>`<td>${r[c]??'—'}</td>`).join('')}</tr>`;});
-        return {confident:true, html:html+'</tbody></table>'};
+
+  // TEAM SEARCH
+  if (equipoCol && /equipo|club|plantel|jugadores de/i.test(q)) {
+    const equipoWords = q.replace(/.*(?:equipo|club|plantel|jugadores de)\s*/i, '').trim().replace(/de la .*/i, '').trim();
+    if (equipoWords.length > 2) {
+      const found = data.filter(r => (r[equipoCol] || '').toLowerCase().includes(equipoWords));
+      if (found.length > 0) {
+        let html = `<strong>👥 ${found.length} jugadores — "${equipoWords}" — ${leagueName}</strong><br><table><thead><tr><th>${nameCol}</th>${numCols.slice(0, 4).map(c => `<th>${c}</th>`).join('')}</tr></thead><tbody>`;
+        found.forEach(r => { html += `<tr><td>${r[nameCol] ?? '—'}</td>${numCols.slice(0, 4).map(c => `<td>${r[c] ?? '—'}</td>`).join('')}</tr>`; });
+        return { confident: true, html: html + '</tbody></table>' };
       }
     }
   }
-  // CONTAR
-  if(/cuántos|cuantos|cantidad|total de jugadores/i.test(q)){
-    return {confident:true, html:`📋 <strong>${leagueName}</strong> tiene <strong>${data.length}</strong> jugadores registrados.`};
+
+  // COUNT
+  if (/cuántos|cuantos|cantidad|total de jugadores/i.test(q)) {
+    return { confident: true, html: `📋 <strong>${leagueName}</strong> tiene <strong>${data.length}</strong> jugadores registrados.` };
   }
-  // RESUMEN
-  if(/resumen|summary|general|overview/i.test(q)){
-    let html=`<strong>📋 ${leagueName}</strong><br>Jugadores: <strong>${data.length}</strong><br>`;
-    for(const col of numCols.slice(0,6)){const vals=data.map(r=>parseFloat(r[col])).filter(v=>!isNaN(v));if(!vals.length)continue;html+=`<strong>${col}</strong>: avg ${(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(2)} · max ${Math.max(...vals)}<br>`;}
-    return {confident:true, html};
+
+  // SUMMARY
+  if (/resumen|summary|general|overview/i.test(q)) {
+    const summary = datasetSummaries[leagueName];
+    let html = `<strong>📋 ${leagueName}</strong><br>Jugadores: <strong>${data.length}</strong><br>`;
+    if (summary) {
+      if (summary.teams.length) html += `Equipos: <strong>${summary.teams.length}</strong><br>`;
+      if (Object.keys(summary.posDistrib).length) {
+        html += `<strong>Posiciones:</strong> ${Object.entries(summary.posDistrib).map(([k, v]) => `${k}: ${v}`).join(', ')}<br>`;
+      }
+      for (const col of Object.keys(summary.colStats).slice(0, 8)) {
+        const s = summary.colStats[col];
+        html += `<strong>${col}</strong>: avg ${s.avg} · max ${s.max} · median ${s.med}<br>`;
+      }
+    }
+    return { confident: true, html };
   }
-  // COLUMNAS
-  if(/columnas|campos|qué datos|que datos|variables/i.test(q)){
-    return {confident:true, html:`📋 Columnas en <strong>${leagueName}</strong>:<br>${columns.map(c=>`• <code>${c}</code>`).join('<br>')}`};
+
+  // COLUMNS
+  if (/columnas|campos|qué datos|que datos|variables/i.test(q)) {
+    return { confident: true, html: `📋 Columnas en <strong>${leagueName}</strong>:<br>${columns.map(c => `• <code>${c}</code>`).join('<br>')}` };
   }
-  // NO PUDO — marca no confident para que Gemini intente si hay API key
-  return {confident:false, html:`🤔 No pude resolver eso localmente. Probá: <em>"Top 10 goleadores de la ${leagueName}"</em> o <em>"Promedio de edad de la ${leagueName}"</em>.`};
+
+  return { confident: false, html: `🤔 No pude resolver eso localmente. Probá: <em>"Top 10 goleadores de la ${leagueName}"</em> o <em>"Promedio de edad de la ${leagueName}"</em>.` };
 }
 
-// ===================== GEMINI — OPTIMIZED TOKEN USAGE =====================
-const SYS_INSTRUCTION='Analista fútbol argentino experto en scouting y perfilado táctico. Respondé HTML puro (strong,table,tr,th,td,br,em,ul,li,p). Español. Conciso y preciso. Datos=arrays: h=headers,r=rows. S=stats: n=min,x=max,a=avg. F=filtros ya aplicados a los datos. Q=consulta del usuario. Cuando te pidan perfiles tácticos (ej: 9 tanque, mediocampista creativo, lateral ofensivo), elegí las columnas más relevantes al perfil de los datos proporcionados (ej: para un 9 tanque priorizá goles, duelos aéreos ganados, tiros, cabezazos; para un creativo priorizá asistencias, pases clave, xA). Siempre justificá tu elección con los datos.';
+// ===================== NO LEAGUE =====================
+function buildNoLeagueOffline() {
+  return `🤔 No detecté a qué liga querés consultar:<br><br>` +
+    DATASETS_CONFIG.map(d => {
+      const ds = loadedDatasets[d.name];
+      return `${d.emoji} <strong>${d.name}</strong>` + (ds ? ` (${ds.length} jug.)` : ``);
+    }).join('<br>') + `<br><br>Mencioná el nombre de la liga en tu consulta.`;
+}
 
-function getHistoryContents(){
-  const conv=getActiveConv();if(!conv||conv.history.length===0) return [];
-  return conv.history.slice(-3).map(m=>({
-    role:m.role==='user'?'user':'model',
-    parts:[{text:stripHtml(m.html)}]
+// ===================== SMART DATA SLICER FOR GEMINI =====================
+function buildCompactData(query, leagueName, data) {
+  const { columns, numCols, nameCol, equipoCol, posCol, pos2Col, pos3Col, edadCol, paisCol, pieCol, alturaCol, candidateCols, defensiveCols, attackCols, passCols } = analyzeColumns(data);
+  const totalRows = data.length;
+  const qType = classifyQuery(query);
+  const qNorm = removeAccents(query.toLowerCase());
+
+  // Pre-filter by explicit filters in query
+  const filters = extractFilters(query.toLowerCase(), candidateCols);
+  let filtered = applyFilters(data, filters);
+  const filterDesc = filters.map(f => `${f.col}${f.op}${f.val}`).join(',');
+
+  // Pre-filter by position if the query mentions a specific position
+  const positionFilter = extractPositionFilter(qNorm);
+  if (positionFilter && posCol) {
+    const posBefore = filtered.length;
+    const posFiltered = filtered.filter(r => {
+      const p1 = removeAccents((r[posCol] || '').toString().toLowerCase());
+      const p2 = pos2Col ? removeAccents((r[pos2Col] || '').toString().toLowerCase()) : '';
+      const p3 = pos3Col ? removeAccents((r[pos3Col] || '').toString().toLowerCase()) : '';
+      return positionFilter.some(pf => p1.includes(pf) || p2.includes(pf) || p3.includes(pf));
+    });
+    // Only use position filter if it yields results
+    if (posFiltered.length > 0) filtered = posFiltered;
+  }
+
+  // Detect sort column
+  const colResult = detectTargetColumn(query.toLowerCase(), candidateCols);
+  const sortCol = colResult.col || candidateCols[0] || numCols[0];
+
+  // Determine how many rows and which columns based on query type
+  let topN, selectedCols, maxTokens;
+
+  // Always include identity columns
+  const identityCols = [nameCol, equipoCol, posCol, pos2Col, pos3Col, edadCol, pieCol, alturaCol].filter(Boolean);
+
+  if (qType === 'profile') {
+    // Profile query → send MANY more rows with ALL relevant columns
+    topN = Math.min(filtered.length, 60);
+    const profileCols = detectProfileColumns(query, candidateCols, columns);
+    // Include identity + all profile-relevant + defensive + attack + pass columns
+    selectedCols = [...identityCols, ...(profileCols || candidateCols.slice(0, 30))];
+    // Add defensive cols explicitly for any query mentioning defense/lateral/central
+    if (/lateral|defens|central|zaguero|volante|contencion|marca/i.test(qNorm)) {
+      selectedCols.push(...defensiveCols);
+    }
+    // Add attack cols for attack-related profiles
+    if (/ofensiv|goleador|extremo|delantero|puntero|enganche|atac/i.test(qNorm)) {
+      selectedCols.push(...attackCols);
+    }
+    // Add pass cols for creative/midfield profiles
+    if (/creativ|enganche|volante|lateral|mediapunta|armador|organiz/i.test(qNorm)) {
+      selectedCols.push(...passCols);
+    }
+    selectedCols = [...new Set(selectedCols)];
+    maxTokens = 16384;
+  } else if (qType === 'compare') {
+    topN = Math.min(filtered.length, 40);
+    selectedCols = [...identityCols, ...candidateCols];
+    selectedCols = [...new Set(selectedCols)];
+    maxTokens = 12288;
+  } else if (qType === 'analysis') {
+    topN = Math.min(filtered.length, 40);
+    selectedCols = [...identityCols, ...candidateCols.slice(0, 30)];
+    selectedCols = [...new Set(selectedCols)];
+    maxTokens = 12288;
+  } else {
+    // Standard → focused data but still include position
+    topN = Math.min(filtered.length, 30);
+    const focusCols = colResult.matched ? [colResult.col, ...candidateCols.filter(c => c !== colResult.col).slice(0, 15)] : candidateCols.slice(0, 18);
+    selectedCols = [...identityCols, ...focusCols];
+    selectedCols = [...new Set(selectedCols)];
+    maxTokens = 8192;
+  }
+
+  // Sort and slice
+  const sorted = [...filtered].sort((a, b) => (parseFloat(b[sortCol]) || 0) - (parseFloat(a[sortCol]) || 0));
+  // Also include bottom 5 for context on distribution
+  const topRows = sorted.slice(0, topN);
+  const bottomRows = (qType === 'profile' || qType === 'analysis') ? sorted.slice(-5) : [];
+  const allRows = [...topRows, ...bottomRows];
+
+  // Build CSV-style compact data (more token-efficient than JSON)
+  const h = selectedCols.map(c => c.length > 30 ? c.substring(0, 30) : c);
+  const csvRows = allRows.map(row => selectedCols.map(c => {
+    const v = row[c];
+    if (v === null || v === undefined || v === '') return '';
+    if (typeof v === 'number') return Number.isInteger(v) ? v : +v.toFixed(2);
+    return v;
+  }));
+
+  // Compact stats from precomputed summary
+  const summary = datasetSummaries[leagueName];
+  let statsStr = '';
+  if (summary) {
+    const relevantStats = {};
+    for (const col of selectedCols.filter(c => summary.colStats[c])) {
+      const s = summary.colStats[col];
+      relevantStats[col.length > 30 ? col.substring(0, 30) : col] = { n: s.min, x: s.max, a: s.avg, m: s.med };
+    }
+    statsStr = JSON.stringify(relevantStats);
+  }
+
+  // Build prompt
+  let prompt = `L:"${leagueName}"|P:${totalRows}|F:${filtered.length}`;
+  if (positionFilter) prompt += `|POS_FILTER:${positionFilter.join(',')}`;
+  prompt += `\nH:${h.join('|')}`;
+  prompt += `\nD:${csvRows.map(r => r.join('|')).join('\n')}`;
+  if (statsStr) prompt += `\nS:${statsStr}`;
+  if (filterDesc) prompt += `\nFilt:${filterDesc}`;
+  if (bottomRows.length) prompt += `\n[last ${bottomRows.length} rows = bottom of ranking]`;
+  // List ALL available columns so Gemini knows everything in the dataset
+  prompt += `\nALL_COLS:${columns.join(',')}`;
+  prompt += `\nQ:${query}`;
+
+  return { prompt, maxTokens };
+}
+
+// Extract position filter from query
+function extractPositionFilter(qNorm) {
+  const posMap = {
+    'lateral izquierd': ['lb','lwb','lateral izquierd','li','left back','wing-back izq'],
+    'lateral derech': ['rb','rwb','lateral derech','ld','right back','wing-back der'],
+    'lateral': ['lb','rb','lwb','rwb','lateral','wing-back','carrilero'],
+    'central': ['cb','central','defensor central','zaguero','stopper'],
+    'volante central': ['cdm','cm','dmf','cmf','volante','mediocampista central','pivote','mediocentro'],
+    'volante ofensiv': ['cam','amf','volante ofensiv','mediapunta','enganche'],
+    'extremo izquierd': ['lw','lm','lwf','extremo izquierd','puntero izquierd'],
+    'extremo derech': ['rw','rm','rwf','extremo derech','puntero derech'],
+    'extremo': ['lw','rw','lm','rm','lwf','rwf','extremo','puntero','wing'],
+    'delantero': ['cf','st','fw','delantero','centrodelantero','9'],
+    'mediapunta': ['cam','amf','mediapunta','enganche','10'],
+    'arquero': ['gk','arquero','portero','guardameta'],
+  };
+  for (const [keyword, positions] of Object.entries(posMap)) {
+    if (qNorm.includes(keyword)) return positions;
+  }
+  return null;
+}
+
+// Build data for multi-league queries
+function buildMultiLeagueData(query, leagueNames) {
+  let prompt = '';
+  for (const ln of leagueNames) {
+    const data = loadedDatasets[ln];
+    if (!data) continue;
+    const { nameCol, equipoCol, posCol, pos2Col, edadCol, candidateCols } = analyzeColumns(data);
+    const colResult = detectTargetColumn(query.toLowerCase(), candidateCols);
+    const sortCol = colResult.col || candidateCols[0];
+    const sorted = [...data].sort((a, b) => (parseFloat(b[sortCol]) || 0) - (parseFloat(a[sortCol]) || 0));
+    const top15 = sorted.slice(0, 15);
+    const cols = [nameCol, equipoCol, posCol, edadCol, sortCol, ...candidateCols.filter(c => c !== sortCol).slice(0, 10)].filter(Boolean);
+    const uniqueCols = [...new Set(cols)];
+    prompt += `\n---${ln}(${data.length}jug)---\nH:${uniqueCols.join('|')}\n`;
+    prompt += top15.map(r => uniqueCols.map(c => r[c] ?? '').join('|')).join('\n');
+  }
+  prompt += `\nQ:${query}`;
+  return { prompt, maxTokens: 12288 };
+}
+
+// ===================== GEMINI ENGINE =====================
+const BASE_SYS_INSTRUCTION = `Sos un analista de fútbol argentino experto en scouting, perfilado táctico y análisis estadístico.
+
+REGLAS DE RESPUESTA:
+- Respondé SOLO en HTML válido para insertar en un div (tags: strong,table,tr,th,td,br,em,ul,li,p,h3).
+- Español rioplatense. Conciso, preciso, profesional.
+- SIEMPRE basá tus respuestas en los datos proporcionados, NO inventes datos.
+- Si un dato no está en los datos que recibís, verificá en ALL_COLS si la columna existe. Si la columna existe en ALL_COLS significa que el dato SÍ está disponible en el dataset aunque no te lo haya pasado. NO digas que el dataset no tiene esa información.
+
+DATOS DISPONIBLES (MUY IMPORTANTE):
+- TODAS las ligas tienen columna de POSICIÓN ESPECÍFICA (ej: "Posicin especfica", "Posicion", etc.) con posiciones como: LB, RB, CB, LCB, RCB, DMF, CMF, AMF, LW, RW, CF, GK, LWB, RWB, etc.
+- TODAS las ligas tienen SEGUNDA POSICIÓN y POSICIÓN EXTRA.
+- TODAS las ligas tienen MÉTRICAS DEFENSIVAS completas: Acciones defensivas realizadas/90, Duelos defensivos/90, Duelos defensivos ganados %, Duelos aéreos/90, Entradas/90, Tiros interceptados/90, Interceptaciones/90, Faltas/90, etc.
+- TODAS las ligas tienen MÉTRICAS OFENSIVAS: Goles, xG, Remates, Tiros a portería, Goles de cabeza, Regates, Toques en área, etc.
+- TODAS las ligas tienen MÉTRICAS DE PASE: Pases/90, Centros/90, Centros banda izquierda/90, Centros banda derecha/90, Pases progresivos, Pases en profundidad, Jugadas claves, etc.
+- Los datos que recibís ya están PRE-FILTRADOS por posición cuando corresponde. La columna H indica los headers.
+
+FORMATO DE DATOS QUE RECIBÍS:
+- L=liga, P=total jugadores, F=filtrados (puede estar filtrado por posición)
+- POS_FILTER=filtro de posición aplicado (si presente)
+- H=headers separados por |
+- D=filas de datos separadas por |
+- S=stats por columna: n=min,x=max,a=avg,m=mediana
+- Filt=filtros ya aplicados
+- ALL_COLS=TODAS las columnas disponibles en el dataset completo
+- Q=consulta del usuario
+
+PERFILES TÁCTICOS:
+Cuando pidan un perfil (9 tanque, enganche, lateral ofensivo, lateral izquierdo, etc.):
+1. Usá la columna de posición para CONFIRMAR que los jugadores juegan en esa posición.
+2. Elegí las columnas más relevantes del perfil táctico solicitado.
+3. Armá un top y justificá con datos concretos de los datos que recibís.
+4. Explicá brevemente qué columnas priorizaste y por qué.
+5. NUNCA digas que no tenés datos de posición o métricas defensivas, porque SÍ los tenés.
+
+COMPARACIONES:
+Cuando comparen jugadores o ligas, usá tablas side-by-side y destacá diferencias clave.`;
+
+function buildSystemInstruction() {
+  // Base instruction + compact data context about all loaded leagues
+  const dataCtx = buildSystemDataContext();
+  if (!dataCtx) return BASE_SYS_INSTRUCTION;
+  return BASE_SYS_INSTRUCTION + `\n\nLIGAS CARGADAS (resumen):\n${dataCtx}`;
+}
+
+function getHistoryContents() {
+  const conv = getActiveConv();
+  if (!conv || conv.history.length === 0) return [];
+  // Send last 4 messages for better context, but strip HTML to save tokens
+  return conv.history.slice(-4).map(m => ({
+    role: m.role === 'user' ? 'user' : 'model',
+    parts: [{ text: stripHtml(m.html) }]
   }));
 }
 
-
-function buildCompactData(query,leagueName,data){
-  const {columns,numCols,nameCol,equipoCol,candidateCols}=analyzeColumns(data);
-  const totalRows=data.length;
-
-  // Pre-filter data using extractFilters
-  const filters=extractFilters(query.toLowerCase(),candidateCols);
-  const filtered=applyFilters(data,filters);
-  const filterDesc=filters.map(f=>`${f.col}${f.op}${f.val}`).join(',');
-
-  // Detect primary sort column (best-effort for ordering)
-  const colResult=detectTargetColumn(query.toLowerCase(),candidateCols);
-  const sortCol=colResult.col||candidateCols[0]||numCols[0];
-
-  // Send ALL columns for top rows so Gemini can pick the right ones for the profile
-  const topN=Math.min(filtered.length,15);
-  const sorted=[...filtered].sort((a,b)=>(parseFloat(b[sortCol])||0)-(parseFloat(a[sortCol])||0));
-  const allCols=[nameCol,equipoCol,...numCols].filter(Boolean);
-  // Deduplicate
-  const headerCols=[...new Set(allCols)];
-  const h=headerCols.map(c=>c.length>20?c.substring(0,20):c);
-  const r=sorted.slice(0,topN).map(row=>headerCols.map(c=>row[c]??''));
-
-  // Compact stats for all numeric columns (Gemini needs full picture)
-  const S={};
-  for(const col of candidateCols.slice(0,12)){
-    const vals=filtered.map(r=>parseFloat(r[col])).filter(v=>!isNaN(v));
-    if(vals.length) S[col.length>20?col.substring(0,20):col]={n:Math.min(...vals),x:Math.max(...vals),a:+(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(2)};
-  }
-
-  const maxTokens=8192;
-
-  // Build minimal prompt — send all column names so Gemini knows what's available
-  let prompt=`L:"${leagueName}" R:${totalRows} FR:${filtered.length}`;
-  prompt+=`\nC:${columns.join(',')}`;
-  prompt+=`\nS:${JSON.stringify(S)}`;
-  prompt+=`\nT:${JSON.stringify({h,r})}`;
-  if(filterDesc) prompt+=`\nF:${filterDesc}`;
-  prompt+=`\nQ:${query}`;
-
-  return {prompt,maxTokens};
+async function queryWithGemini(query, leagueName, data) {
+  const { prompt, maxTokens } = buildCompactData(query, leagueName, data);
+  const history = getHistoryContents();
+  const userMsg = { role: 'user', parts: [{ text: prompt }] };
+  const contents = [...history, userMsg];
+  return await callGeminiRaw(contents, { maxTokens });
 }
 
-async function queryWithGemini(query,leagueName,data){
-  const {prompt,maxTokens}=buildCompactData(query,leagueName,data);
-  const history=getHistoryContents();
-  const userMsg={role:'user',parts:[{text:prompt}]};
-  const contents=[...history,userMsg];
-  return await callGeminiRaw(contents,{maxTokens});
+async function queryMultiLeagueGemini(query, leagueNames) {
+  const { prompt, maxTokens } = buildMultiLeagueData(query, leagueNames);
+  const history = getHistoryContents();
+  const userMsg = { role: 'user', parts: [{ text: prompt }] };
+  const contents = [...history, userMsg];
+  return await callGeminiRaw(contents, { maxTokens });
 }
 
-async function queryGeminiGeneral(query){
-  const summary=buildMultiLeagueSummary();
-  const mentionsData=/jugador|gol|asist|equipo|club|pase|tiro|minuto|comparar|compará/i.test(query);
-  const maxTokens=mentionsData?4096:2048;
-  const prompt=`Ligas:${summary}\nQ:${query}`;
-  const history=getHistoryContents();
-  const userMsg={role:'user',parts:[{text:prompt}]};
-  const contents=[...history,userMsg];
-  return await callGeminiRaw(contents,{maxTokens});
+async function queryGeminiGeneral(query) {
+  const mentionsData = /jugador|gol|asist|equipo|club|pase|tiro|minuto|comparar|compará/i.test(query);
+  const maxTokens = mentionsData ? 4096 : 2048;
+  // Send compact league summary in prompt
+  const ligasSummary = DATASETS_CONFIG.map(ds => {
+    const s = datasetSummaries[ds.name];
+    if (!s) return null;
+    return `${ds.emoji}${ds.name.replace(/ 2025$/, '')}:${s.totalPlayers}jug,${s.teams.length}eq`;
+  }).filter(Boolean).join('; ');
+  const prompt = `Ligas:[${ligasSummary}]\nQ:${query}`;
+  const history = getHistoryContents();
+  const userMsg = { role: 'user', parts: [{ text: prompt }] };
+  const contents = [...history, userMsg];
+  return await callGeminiRaw(contents, { maxTokens });
 }
-async function callGeminiRaw(contents,opts={}){
-  const maxTokens=opts.maxTokens||4096;
-  const body=JSON.stringify({
-    systemInstruction:{parts:[{text:SYS_INSTRUCTION}]},
+
+async function callGeminiRaw(contents, opts = {}) {
+  const maxTokens = opts.maxTokens || 4096;
+  const sysInstruction = buildSystemInstruction();
+  const body = JSON.stringify({
+    systemInstruction: { parts: [{ text: sysInstruction }] },
     contents,
-    generationConfig:{temperature:0.3,maxOutputTokens:maxTokens}
+    generationConfig: { temperature: 0.3, maxOutputTokens: maxTokens }
   });
-  const url=`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
-  const resp=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body});
-  if(!resp.ok){
-    const err=await resp.json().catch(()=>({}));const msg=err?.error?.message||'';
-    if(resp.status===429||/quota|rate.?limit/i.test(msg)){
-      const wait=parseFloat(msg.match(/retry in ([\d.]+)/i)?.[1]||'3');
-      await new Promise(r=>setTimeout(r,(wait+1)*1000));
-      const r2=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body});
-      if(r2.ok){const d=await r2.json();return d.candidates?.[0]?.content?.parts?.map(p=>p.text||'').join('')||'(sin respuesta)';}
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+  const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    const msg = err?.error?.message || '';
+    if (resp.status === 429 || /quota|rate.?limit/i.test(msg)) {
+      const wait = parseFloat(msg.match(/retry in ([\d.]+)/i)?.[1] || '3');
+      await new Promise(r => setTimeout(r, (wait + 1) * 1000));
+      const r2 = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+      if (r2.ok) {
+        const d = await r2.json();
+        return d.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '(sin respuesta)';
+      }
       throw new Error('⏳ Cuota de Gemini agotada. Esperá unos minutos o usá consultas offline (top, promedio, resumen).');
     }
-    if([400,401,403].includes(resp.status)){apiKey='';try{localStorage.removeItem('fstats_gemini_key');}catch(e){}updateApiStatus(false);document.getElementById('noAiNotice').classList.add('visible');throw new Error('API key inválida. Reconfigurala.');}
-    throw new Error(msg||`Error ${resp.status}`);
+    if ([400, 401, 403].includes(resp.status)) {
+      apiKey = ''; try { localStorage.removeItem('fstats_gemini_key'); } catch (e) {}
+      updateApiStatus(false); document.getElementById('noAiNotice').classList.add('visible');
+      throw new Error('API key inválida. Reconfigurala.');
+    }
+    throw new Error(msg || `Error ${resp.status}`);
   }
-  const data=await resp.json();return data.candidates?.[0]?.content?.parts?.map(p=>p.text||'').join('')||'(sin respuesta)';
+  const data = await resp.json();
+  return data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '(sin respuesta)';
 }
-function escapeHtml(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+
+// ===================== MAIN SEND HANDLER =====================
+async function handleSend() {
+  const inp = document.getElementById('queryInput');
+  const query = inp.value.trim();
+  if (!query || isProcessing) return;
+  if (!getActiveConv()) createNewConversation(true);
+  isProcessing = true; inp.value = ''; inp.style.height = 'auto';
+  document.getElementById('btnSend').disabled = true;
+  addMessage('user', escapeHtml(query));
+  showTyping();
+
+  try {
+    const detectedLeagues = detectDatasets(query);
+    const ln = detectedLeagues.length > 0 ? detectedLeagues[0] : null;
+    const isMultiLeague = detectedLeagues.length > 1 && /compar|entre|vs|ambas|todas/i.test(query);
+    const cacheLeagueKey = isMultiLeague ? detectedLeagues.join('+') : (ln || '');
+
+    // Check persistent cache
+    const cached = CacheManager.get(query, cacheLeagueKey);
+    if (cached) {
+      hideTyping(); addMessage('assistant', cached);
+      isProcessing = false; return;
+    }
+
+    let response;
+
+    // ===== MULTI-LEAGUE =====
+    if (isMultiLeague) {
+      const conv = getActiveConv();
+      if (conv && !conv.leagueEmoji) { conv.leagueEmoji = '🔄'; saveConvs(); }
+
+      if (apiKey) {
+        response = await queryMultiLeagueGemini(query, detectedLeagues);
+      } else {
+        // Offline multi-league: show side-by-side summaries
+        let html = `<strong>📊 Comparación entre ligas</strong><br><br>`;
+        for (const lName of detectedLeagues) {
+          const data = loadedDatasets[lName];
+          if (!data) { html += `❌ ${lName}: sin datos<br>`; continue; }
+          const s = datasetSummaries[lName];
+          html += `<strong>${DATASETS_CONFIG.find(d => d.name === lName)?.emoji || ''} ${lName}</strong>: ${data.length} jugadores`;
+          if (s && s.teams.length) html += `, ${s.teams.length} equipos`;
+          html += `<br>`;
+        }
+        html += `<br><em>Para análisis detallados entre ligas, conectá Gemini AI.</em>`;
+        response = html;
+      }
+    }
+    // ===== NO LEAGUE DETECTED =====
+    else if (!ln) {
+      // Check if it's a "qué ligas" query
+      if (/qu[eé] ligas|ligas cargadas|ligas disponibles|ligas ten[eé]s/i.test(query)) {
+        let html = `📋 <strong>Ligas cargadas:</strong><br><br>`;
+        for (const ds of DATASETS_CONFIG) {
+          const data = loadedDatasets[ds.name];
+          const s = datasetSummaries[ds.name];
+          html += `${ds.emoji} <strong>${ds.name}</strong>`;
+          if (data) html += ` — ${data.length} jugadores`;
+          if (s && s.teams.length) html += `, ${s.teams.length} equipos`;
+          if (s && s.numericColumns.length) html += `<br><em style="color:var(--text-dim);font-size:12px">Métricas: ${s.numericColumns.slice(0, 8).join(', ')}${s.numericColumns.length > 8 ? '...' : ''}</em>`;
+          html += `<br>`;
+        }
+        response = html;
+      } else if (apiKey) {
+        response = await queryGeminiGeneral(query);
+      } else {
+        response = buildNoLeagueOffline();
+      }
+    }
+    // ===== SINGLE LEAGUE =====
+    else {
+      const data = loadedDatasets[ln];
+      if (!data) {
+        response = `❌ Los datos de <strong>${ln}</strong> no pudieron cargarse.`;
+      } else {
+        const conv = getActiveConv();
+        if (conv && !conv.leagueEmoji) {
+          conv.leagueEmoji = DATASETS_CONFIG.find(d => d.name === ln)?.emoji || '💬';
+          saveConvs();
+        }
+
+        const simple = isSimpleOfflineQuery(query);
+
+        if (simple) {
+          const offlineResult = queryOffline(query, ln, data);
+          response = offlineResult.html;
+        } else if (apiKey) {
+          response = await queryWithGemini(query, ln, data);
+        } else {
+          // No API key → try offline, then suggest
+          const offlineResult = queryOffline(query, ln, data);
+          if (offlineResult.confident) {
+            response = offlineResult.html;
+          } else {
+            response = offlineResult.html + `<br><br><em>💡 Conectá Gemini AI para consultas avanzadas, perfiles tácticos y análisis.</em>`;
+          }
+        }
+      }
+    }
+
+    // Save to persistent cache
+    CacheManager.set(query, cacheLeagueKey, response);
+    hideTyping(); addMessage('assistant', response);
+  } catch (err) {
+    hideTyping(); addMessage('assistant', `❌ Error: ${escapeHtml(err.message)}`);
+  }
+  isProcessing = false;
+}
 </script>
 
 </body>
 </html>
+
 
