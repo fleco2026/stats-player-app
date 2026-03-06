@@ -66,9 +66,9 @@ FStats.POSITION_PROFILES = {
     must: ['centro','pase','asist','progres','carrera','duelo','regate','defensiv','entrada','intercep','aceler','banda','centros.*tercio','ataque.*profundidad'],
     extra: ['duelo.*defensiv','duelo.*atac','pase.*lateral','pase.*adelante','falta']
   },
-  'central|defensor|zaguero|stopper|marcador central': {
-    must: ['duelo','intercep','entrada','aereo','cabeza','despe','bloqueo','falta','defensiv','tiro.*intercep','posesi.*entrada','posesi.*intercep','tarjeta'],
-    extra: ['pase.*largo','altura','peso','duelo.*defensiv']
+  'central|defensor|zaguero|stopper|marcador central|defensa central': {
+    must: ['duelo','intercep','entrada','aereo','cabeza','despe','bloqueo','falta','defensiv','tiro.*intercep','posesi.*entrada','posesi.*intercep','tarjeta','acciones.*defensiv','duelos.*defensiv','duelos.*ganados','duelos.*aereo','pase.*largo','pase.*progres','recuper','corte'],
+    extra: ['pase.*largo','altura','peso','duelo.*defensiv','pase.*corto','pase','gol.*cabeza','amarill','roj','minut','partido']
   },
   'volante.*central|contencion|5|pivote|mediocentro|volante defensiv': {
     must: ['pase','intercep','duelo','recuper','progres','entrada','falta','corte','defensiv','pase.*corto','pase.*largo','posesi'],

@@ -110,7 +110,22 @@ Cuando pidan un perfil (9 tanque, enganche, lateral ofensivo, lateral izquierdo,
 5. NUNCA digas que no tenés datos de posición o métricas defensivas, porque SÍ los tenés.
 
 COMPARACIONES:
-Cuando comparen jugadores o ligas, usá tablas side-by-side y destacá diferencias clave.`;
+Cuando comparen jugadores o ligas, usá tablas side-by-side y destacá diferencias clave.
+
+RESPUESTAS COMPLETAS:
+- SIEMPRE completá toda la respuesta. Si estás armando una tabla, TERMINÁ la tabla.
+- Si estás haciendo un top/ranking, mostrá TODOS los jugadores pedidos, no dejes a medias.
+- Si el usuario pide "incluir métricas", mostrá una tabla completa con TODAS las métricas relevantes.
+- Priorizá tablas compactas y bien estructuradas sobre texto largo.
+- Para perfiles de defensores centrales, incluí: Duelos defensivos/90, Duelos defensivos ganados %, Duelos aéreos/90, Duelos aéreos ganados %, Entradas/90, Tiros interceptados/90, Interceptaciones/90, Bloqueos/90, Acciones defensivas/90, Pases/90, Pases largos/90.`;
+
+// Maximum number of automatic continuation attempts when Gemini truncates a response (MAX_TOKENS).
+// Kept low (2) to avoid excessive API usage while still recovering from most truncations.
+const MAX_CONTINUATION_ATTEMPTS = 2;
+// Threshold below which a query is considered a short follow-up that may inherit league context.
+const SHORT_QUERY_THRESHOLD = 80;
+// Continuation prompt sent to Gemini when a response is cut off at the token limit.
+const CONTINUATION_PROMPT = 'La respuesta se cortó. Continuá exactamente desde donde quedaste, completá todas las tablas y el análisis. No repitas lo que ya dijiste.';
 
 function buildSystemInstruction() {
   // Base instruction + compact data context about all loaded leagues
@@ -122,11 +137,22 @@ function buildSystemInstruction() {
 function getHistoryContents() {
   const conv = getActiveConv();
   if (!conv || conv.history.length === 0) return [];
-  // Send last 4 messages for better context, but strip HTML to save tokens
-  return conv.history.slice(-4).map(m => ({
-    role: m.role === 'user' ? 'user' : 'model',
-    parts: [{ text: stripHtml(m.html) }]
-  }));
+  // Send last 6 messages for better follow-up context
+  const lastN = conv.history.slice(-6);
+  return lastN.map((m, idx) => {
+    const isLast = idx === lastN.length - 1;
+    const isAssistant = m.role !== 'user';
+    // Give more context to the last assistant message (what the user is following up on)
+    let maxLen;
+    if (isLast && isAssistant) maxLen = 3000;
+    else if (isAssistant) maxLen = 1500;
+    else maxLen = 500;
+    const text = stripHtmlFull(m.html, maxLen);
+    return {
+      role: m.role === 'user' ? 'user' : 'model',
+      parts: [{ text }]
+    };
+  });
 }
 
 async function queryWithGemini(query, leagueName, data) {
@@ -163,39 +189,70 @@ async function queryGeminiGeneral(query) {
 
 async function callGeminiRaw(contents, opts = {}) {
   const maxTokens = opts.maxTokens || 4096;
+  const maxContinuations = opts.maxContinuations !== undefined ? opts.maxContinuations : MAX_CONTINUATION_ATTEMPTS;
   const sysInstruction = buildSystemInstruction();
-  const body = JSON.stringify({
-    systemInstruction: { parts: [{ text: sysInstruction }] },
-    contents,
-    generationConfig: { temperature: 0.3, maxOutputTokens: maxTokens }
-  });
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${FStats.GEMINI_MODEL}:generateContent?key=${FStats.apiKey}`;
-  const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({}));
-    const msg = err?.error?.message || '';
-    if (resp.status === 429 || /quota|rate.?limit/i.test(msg)) {
-      const wait = parseFloat(msg.match(/retry in ([\d.]+)/i)?.[1] || '3');
-      await new Promise(r => setTimeout(r, (wait + 1) * 1000));
-      const r2 = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
-      if (r2.ok) {
-        const d = await r2.json();
-        return d.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '(sin respuesta)';
+
+  let fullResponse = '';
+  let currentContents = [...contents];
+  let continuations = 0;
+
+  while (continuations <= maxContinuations) {
+    const body = JSON.stringify({
+      systemInstruction: { parts: [{ text: sysInstruction }] },
+      contents: currentContents,
+      generationConfig: { temperature: 0.3, maxOutputTokens: maxTokens }
+    });
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${FStats.GEMINI_MODEL}:generateContent?key=${FStats.apiKey}`;
+    const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      const msg = err?.error?.message || '';
+      if (resp.status === 429 || /quota|rate.?limit/i.test(msg)) {
+        const wait = parseFloat(msg.match(/retry in ([\d.]+)/i)?.[1] || '3');
+        await new Promise(r => setTimeout(r, (wait + 1) * 1000));
+        const r2 = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+        if (r2.ok) {
+          const d = await r2.json();
+          const retryText = d.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+          fullResponse += retryText;
+          break;
+        }
+        throw new Error('⏳ Cuota de Gemini agotada. Esperá unos minutos o usá consultas offline (top, promedio, resumen).');
       }
-      throw new Error('⏳ Cuota de Gemini agotada. Esperá unos minutos o usá consultas offline (top, promedio, resumen).');
-    }
-    if ([400, 401, 403].includes(resp.status)) {
-      FStats.apiKey = '';
-      try { localStorage.removeItem('fstats_gemini_key'); } catch (err) {
-        console.warn('[Chat] Error removing API key:', err);
+      if ([400, 401, 403].includes(resp.status)) {
+        FStats.apiKey = '';
+        try { localStorage.removeItem('fstats_gemini_key'); } catch (err) {
+          console.warn('[Chat] Error removing API key:', err);
+        }
+        updateApiStatus(false); document.getElementById('noAiNotice').classList.add('visible');
+        throw new Error('API key inválida. Reconfigurala.');
       }
-      updateApiStatus(false); document.getElementById('noAiNotice').classList.add('visible');
-      throw new Error('API key inválida. Reconfigurala.');
+      throw new Error(msg || `Error ${resp.status}`);
     }
-    throw new Error(msg || `Error ${resp.status}`);
+
+    const data = await resp.json();
+    const candidate = data.candidates?.[0];
+    const partText = candidate?.content?.parts?.map(p => p.text || '').join('') || '';
+    fullResponse += partText;
+
+    // Check if response was truncated due to token limit
+    const finishReason = candidate?.finishReason;
+    if (finishReason === 'MAX_TOKENS' && continuations < maxContinuations) {
+      continuations++;
+      currentContents = [
+        ...currentContents,
+        { role: 'model', parts: [{ text: partText }] },
+        { role: 'user', parts: [{ text: CONTINUATION_PROMPT }] }
+      ];
+      continue;
+    }
+
+    break;
   }
-  const data = await resp.json();
-  return data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '(sin respuesta)';
+
+  if (!fullResponse) return '(sin respuesta)';
+  return fullResponse;
 }
 
 // ===================== MAIN SEND HANDLER =====================
@@ -211,9 +268,21 @@ async function handleSend() {
 
   try {
     const detectedLeagues = detectDatasets(query);
-    const ln = detectedLeagues.length > 0 ? detectedLeagues[0] : null;
+    let ln = detectedLeagues.length > 0 ? detectedLeagues[0] : null;
     const isMultiLeague = detectedLeagues.length > 1 && /compar|entre|vs|ambas|todas/i.test(query);
     const cacheLeagueKey = isMultiLeague ? detectedLeagues.join('+') : (ln || '');
+
+    // If no league detected but this looks like a short follow-up, inherit league from conversation history
+    if (!ln && !isMultiLeague && query.length < SHORT_QUERY_THRESHOLD) {
+      const conv = getActiveConv();
+      if (conv && conv.history.length > 0) {
+        const prevMessages = conv.history.slice(-4).map(m => m.html).join(' ');
+        const prevLeagues = detectDatasets(prevMessages);
+        if (prevLeagues.length > 0) {
+          ln = prevLeagues[0];
+        }
+      }
+    }
 
     // Check persistent cache
     const cached = FStats.CacheManager.get(query, cacheLeagueKey);

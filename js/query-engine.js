@@ -327,17 +327,17 @@ function buildCompactData(query, leagueName, data) {
       selectedCols.push(...passCols);
     }
     selectedCols = [...new Set(selectedCols)];
-    maxTokens = 16384;
+    maxTokens = 32768;
   } else if (qType === 'compare') {
     topN = Math.min(filtered.length, 40);
     selectedCols = [...identityCols, ...candidateCols];
     selectedCols = [...new Set(selectedCols)];
-    maxTokens = 12288;
+    maxTokens = 16384;
   } else if (qType === 'analysis') {
     topN = Math.min(filtered.length, 40);
     selectedCols = [...identityCols, ...candidateCols.slice(0, 30)];
     selectedCols = [...new Set(selectedCols)];
-    maxTokens = 12288;
+    maxTokens = 16384;
   } else {
     // Standard → focused data but still include position
     topN = Math.min(filtered.length, 30);
